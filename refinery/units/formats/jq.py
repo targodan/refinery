@@ -6,6 +6,8 @@ from refinery import Unit, Arg
 
 
 class jq(Unit):
+    meta_key_json_key = "json_key"
+
     """
     This unit is a thin wrapper around the tool `jq`, with some adjustments to fit the binref-principles.
     Each input chunk is processed individually, but completely. Meaning, each chunk is processed as
@@ -39,7 +41,8 @@ class jq(Unit):
 
     def _chunk_and_format_dict(self, data: dict):
         for key, value in data.items():
-            yield self.labelled(self.format_json(value), json_key=key)
+            metas = {self.meta_key_json_key: key}
+            yield self.labelled(self.format_json(value), **metas)
 
     def format_json(self, data) -> bytes:
         if self.args.raw:
