@@ -3,6 +3,7 @@ requires = [
     "cython",
     "colorama",
     "defusedxml",
+    "jq",
     "lief>=0.17.0",
     "msgpack>=1.0.0",
     "pycryptodomex",
