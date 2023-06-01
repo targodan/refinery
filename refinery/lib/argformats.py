@@ -294,7 +294,8 @@ def sliceobj(expression: Union[int, str, slice], data: Optional[Chunk] = None, r
             return slice(k, k + 1) if k + 1 else slice(k, None, None)
         return slice(0, k)
     for k, item in enumerate(sliced):
-        if item is None or isinstance(item, int):
+        if item is None or isinstance(item, (int, float)):
+            # Allowing floats, for unit sigsnip
             continue
         if isbuffer(item) and len(item) in (1, 2, 4, 8, 16):
             sliced[k] = int.from_bytes(item, 'little')

@@ -90,6 +90,11 @@ class TestArgumentFormats(TestBase):
             argformats.multibin('le:e:0x5D000111'),
             b'\x11\x01\x00\x5D')
 
+    def test_slice_objects_can_be_float(self):
+        L = loader.load_pipeline
+        p = L('emit h:01000000 | snip 1.5:2')
+        self.assertEqual(p(), B'\0')
+
     def test_slice_objects_with_handlers(self):
         L = self.load_pipeline
         p = L('emit h:01000000 | put a [| snip le:var:a ]')
