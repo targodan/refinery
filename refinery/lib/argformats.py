@@ -396,7 +396,8 @@ def sliceobj(
     for k, item in enumerate(sliced):
         if item is None:
             continue
-        if isinstance(item, int):
+        if isinstance(item, (int, float)):
+            # Allowing floats, for unit sigsnip
             continue
         if isbuffer(item) and len(item) in (1, 2, 4, 8, 16):
             sliced[k] = int.from_bytes(item, 'little')
