@@ -20,3 +20,8 @@ __pycache__
 mptest.errors
 .coverage
 coverage.json
+
+/binary-refinery
+/init.sh
+/init_old.sh
+/.idea
