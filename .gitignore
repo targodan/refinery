@@ -12,3 +12,8 @@ __init__.pkl
 *.egg-info
 *.eggs
 *.pyc
+
+/binary-refinery
+/init.sh
+/init_old.sh
+/.idea
