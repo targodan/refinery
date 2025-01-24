@@ -14,20 +14,41 @@ import re
 import struct
 import weakref
 
-from typing import List, Union, Tuple, Optional, Iterable, ByteString, TypeVar, Generic, Any, Dict
+from typing import (
+    overload,
+    Any,
+    ByteString,
+    Dict,
+    Generic,
+    Iterable,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 
 T = TypeVar('T', bound=Union[bytearray, bytes, memoryview])
+C = TypeVar('C', bound=Union[bytearray, bytes, memoryview])
 UnpackType = Union[int, bool, float, bytes]
 
 
-def signed(k: int, bits: int):
-    M = 1 << bits
+def signed(k: int, bitsize: int):
+    """
+    If `k` is an integer of the given bit size, cast it to a signed one.
+    """
+    M = 1 << bitsize
     k = k & (M - 1)
-    return k - M if k >> (bits - 1) else k
+    return k - M if k >> (bitsize - 1) else k
 
 
 class EOF(EOFError):
+    """
+    While reading from a `refinery.lib.structures.MemoryFile`, less bytes were available than
+    requested. The exception contains the data from the incomplete read.
+    """
     def __init__(self, rest: ByteString = B''):
         super().__init__('Unexpected end of buffer.')
         self.rest = rest
@@ -37,7 +58,11 @@ class EOF(EOFError):
 
 
 class StreamDetour:
-    def __init__(self, stream: io.IOBase, offset=None, whence=io.SEEK_SET):
+    """
+    A stream detour is used as a context manager to temporarily read from a different location
+    in the stream and then return to the original offset when the context ends.
+    """
+    def __init__(self, stream: io.IOBase, offset: Optional[int] = None, whence: int = io.SEEK_SET):
         self.stream = stream
         self.offset = offset
         self.whence = whence
@@ -52,10 +77,10 @@ class StreamDetour:
         self.stream.seek(self.cursor, io.SEEK_SET)
 
 
-class MemoryFile(Generic[T], io.IOBase):
+class MemoryFileMethods(Generic[T]):
     """
-    A thin wrapper around (potentially mutable) byte sequences which gives it the
-    features of a file-like object.
+    A thin wrapper around (potentially mutable) byte sequences which gives it the features of a
+    file-like object.
     """
     closed: bool
     read_as_bytes: bool
@@ -137,12 +162,21 @@ class MemoryFile(Generic[T], io.IOBase):
     def remaining_bytes(self) -> int:
         return len(self._data) - self.tell()
 
+    def detour(self, offset: Optional[int] = None, whence: int = io.SEEK_SET):
+        return StreamDetour(self, offset, whence=whence)
+
     def writable(self) -> bool:
         if self._closed:
             return False
         if isinstance(self._data, memoryview):
             return not self._data.readonly
         return isinstance(self._data, bytearray)
+
+    def read_as(self, cast: Type[C], size: int = -1, peek: bool = False) -> C:
+        out = self.read(size, peek)
+        if not isinstance(out, cast):
+            out = cast(out)
+        return out
 
     def read(self, size: int = -1, peek: bool = False) -> T:
         beginning = self._cursor
@@ -327,6 +361,10 @@ class MemoryFile(Generic[T], io.IOBase):
         self.write(replay)
 
 
+class MemoryFile(MemoryFileMethods[T], io.BytesIO):
+    pass
+
+
 class order(str, enum.Enum):
     big = '>'
     little = '<'
@@ -334,8 +372,8 @@ class order(str, enum.Enum):
 
 class StructReader(MemoryFile[T]):
     """
-    An extension of a `refinery.lib.structures.MemoryFile` which provides methods to
-    read structured data.
+    An extension of a `refinery.lib.structures.MemoryFile` which provides methods to read
+    structured data.
     """
 
     class Unaligned(RuntimeError):
@@ -376,7 +414,7 @@ class StructReader(MemoryFile[T]):
         """
         Read bytes from the underlying stream. Raises a `RuntimeError` when the stream is not currently
         byte-aligned, i.e. when `refinery.lib.structures.StructReader.byte_aligned` is `False`. Raises
-        an exception of type `refinery.lib.structures.EOF` when less data is available in the stream than
+        an exception of type `refinery.lib.structures.EOF` when fewer data is available in the stream than
         requested via the `size` parameter. The remaining data can be extracted from the exception.
         Use `refinery.lib.structures.StructReader.read_bytes` to read bytes from the stream when it is
         not byte-aligned.
@@ -406,13 +444,22 @@ class StructReader(MemoryFile[T]):
         self._nbits = 0
         self._bbits = 0
         mod = self._cursor % blocksize
-        self.seekrel(mod and blocksize - mod)
+        if mod:
+            self.seekrel(blocksize - mod)
         return nbits, bbits
 
-    def read_integer(self, length: int, peek: bool = False) -> int:
+    @property
+    def remaining_bits(self) -> int:
+        return 8 * self.remaining_bytes + self._nbits
+
+    def read_integer(self, length: Optional[int] = None, peek: bool = False) -> int:
         """
         Read `length` many bits from the underlying stream as an integer.
         """
+        if length is None:
+            length = self.remaining_bits
+        if length < 0:
+            raise ValueError
         if length < self._nbits:
             new_count = self._nbits - length
             if self.bigendian:
@@ -427,16 +474,21 @@ class StructReader(MemoryFile[T]):
                 self._nbits = new_count
             return result
 
-        nbits, bbits = self.byte_align()
+        nbits, bbits = self._nbits, self._bbits
         number_of_missing_bits = length - nbits
         bytecount, rest = divmod(number_of_missing_bits, 8)
         if rest:
             bytecount += 1
             rest = 8 - rest
+        bb = self.read1(bytecount, True)
+        if len(bb) != bytecount:
+            raise EOFError
+        if not peek:
+            self.seekrel(bytecount)
         if bytecount == 1:
-            result, = self.read_exactly(1, peek)
+            result, = bb
         else:
-            result = int.from_bytes(self.read_exactly(bytecount, peek), self.byteorder_name)
+            result = int.from_bytes(bb, self.byteorder_name)
         if not nbits and not rest:
             return result
         if self.bigendian:
@@ -511,13 +563,15 @@ class StructReader(MemoryFile[T]):
         current_cursor = self.tell()
 
         # reserved struct characters: xcbB?hHiIlLqQnNefdspP
-        for k, part in enumerate(re.split('(\\d*[auwE])', spec)):
+        for k, part in enumerate(re.split('(\\d*[auwgE])', spec)):
             if k % 2 == 1:
                 count = 1 if len(part) == 1 else int(part[:~0])
                 part = part[~0]
                 for _ in range(count):
                     if part == 'a':
                         data.append(self.read_c_string())
+                    elif part == 'g':
+                        data.append(self.read_guid())
                     elif part == 'u':
                         data.append(self.read_w_string())
                     elif part == 'w':
@@ -578,11 +632,43 @@ class StructReader(MemoryFile[T]):
             self.seekrel(len(terminator))
             return bytearray(data)
 
+    def read_guid(self) -> str:
+        _mode = self.bigendian
+        self.bigendian = False
+        try:
+            a = self.u32()
+            b = self.u16()
+            c = self.u16()
+            d = self.read(2).hex().upper()
+            e = self.read(6).hex().upper()
+        except Exception:
+            raise
+        else:
+            return F'{a:08X}-{b:04X}-{c:04X}-{d}-{e}'
+        finally:
+            self.bigendian = _mode
+
+    @overload
+    def read_c_string(self) -> bytearray:
+        ...
+
+    @overload
+    def read_c_string(self, encoding: str) -> str:
+        ...
+
     def read_c_string(self, encoding=None) -> Union[str, bytearray]:
         data = self.read_terminated_array(B'\0')
         if encoding is not None:
             data = data.decode(encoding)
         return data
+
+    @overload
+    def read_w_string(self) -> bytearray:
+        ...
+
+    @overload
+    def read_w_string(self, encoding: str) -> str:
+        ...
 
     def read_w_string(self, encoding=None) -> Union[str, bytearray]:
         data = self.read_terminated_array(B'\0\0', 2)
@@ -655,8 +741,7 @@ class Struct(metaclass=StructMeta):
     The initialization routine of the structure will be called with a single argument `reader`. If
     the object `data` is already a `refinery.lib.structures.StructReader`, then it will be passed
     as `reader`. Otherwise, the argument will be wrapped in a `refinery.lib.structures.StructReader`.
-    Before initialization of the struct, the member `bar` of the newly created structure will be
-    set to the value `29`.
+    Additional arguments to the struct are passed through.
     """
     _data: Union[memoryview, bytearray]
 
@@ -671,7 +756,7 @@ class Struct(metaclass=StructMeta):
             self._data = bytearray(self._data)
         return self._data
 
-    def __init__(self, reader: StructReader):
+    def __init__(self, reader: StructReader, *args, **kwargs):
         pass
 
 

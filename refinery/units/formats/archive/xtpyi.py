@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import ByteString, Callable, Dict, List, Optional, Set, Union, NamedTuple, Generator
-from types import CodeType
+from typing import TYPE_CHECKING, NamedTuple
 
 import marshal
 import enum
@@ -20,10 +19,17 @@ from importlib.util import MAGIC_NUMBER
 
 from refinery.units.formats.archive import Arg, ArchiveUnit
 from refinery.units.pattern.carve import carve
-from refinery.lib.structures import EOF, MemoryFile, StreamDetour, Struct, StructReader
+from refinery.lib.structures import MemoryFile, StreamDetour, Struct, StructReader
 from refinery.lib.tools import NoLogging, normalize_word_separators
 
 from Cryptodome.Cipher import AES
+
+
+if TYPE_CHECKING:
+    from types import CodeType
+    from typing import Callable, Dict, List, Tuple, Optional, Set, Union, Generator, Iterable
+    from xdis import Instruction
+    from refinery.lib.types import ByteStr
 
 
 class Unmarshal(enum.IntEnum):
@@ -44,7 +50,7 @@ def decompress_peek(buffer, size=512) -> Optional[bytes]:
 
 
 class Code(NamedTuple):
-    version: float
+    version: Tuple[int]
     timestamp: int
     magic: int
     container: CodeType
@@ -52,44 +58,61 @@ class Code(NamedTuple):
     code_objects: dict
 
 
-def extract_code_from_buffer(buffer: ByteString, file_name: Optional[str] = None) -> Generator[Code, None, None]:
-    main: xtpyi = xtpyi
+def extract_code_from_buffer(buffer: ByteStr, file_name: Optional[str] = None) -> Generator[Code, None, None]:
     code_objects = {}
-    sys_stderr = sys.stderr
-    sys.stderr = open(os.devnull, 'w')
     file_name = file_name or '<unknown>'
-    try:
-        version, timestamp, magic_int, codes, is_pypy, _, _ = \
-            main._xdis.load.load_module_from_file_object(MemoryFile(buffer), file_name, code_objects)
-    finally:
-        sys.stderr.close()
-        sys.stderr = sys_stderr
+    load = xtpyi._xdis.load.load_module_from_file_object
+    with NoLogging(NoLogging.Mode.STD_ERR):
+        version, timestamp, magic_int, codes, is_pypy, _, _ = load(MemoryFile(buffer), file_name, code_objects)
     if not isinstance(codes, list):
         codes = [codes]
     for code in codes:
         yield Code(version, timestamp, magic_int, code, is_pypy, code_objects)
 
 
-def decompile_buffer(buffer: Union[Code, ByteString], file_name: Optional[str] = None) -> ByteString:
+def disassemble_code(code: CodeType, version=None) -> Iterable[Instruction]:
+    dis = xtpyi._xdis
+    opc = None
+    if version is not None:
+        if isinstance(version, float):
+            version = str(version)
+        if not isinstance(version, str):
+            version = dis.version_info.version_tuple_to_str(version)
+        with contextlib.suppress(KeyError):
+            opc = dis.op_imports.op_imports[version]
+    return dis.std.Bytecode(code, opc=opc)
+
+
+def decompile_buffer(buffer: Union[Code, ByteStr], file_name: Optional[str] = None) -> ByteStr:
     main: xtpyi = xtpyi
     errors = ''
     python = ''
     codes = [buffer]
+
     if not isinstance(buffer, Code):
         codes = list(extract_code_from_buffer(buffer, file_name))
+
+    def _engines():
+        nonlocal errors
+        try:
+            dc = main._decompyle3
+        except ImportError:
+            errors += '# The decompiler decompyle3 is not installed.\n'
+        else:
+            yield 'decompyle3', dc
+        try:
+            dc = main._uncompyle6
+        except ImportError:
+            errors += '# The decompiler decompyle3 is not installed.\n'
+        else:
+            yield 'uncompyle6', dc
+
+    engines = dict(_engines())
+
+    if not engines:
+        errors += '# (all missing, install one of the above to enable decompilation)'
+
     for code in codes:
-        engines = {}
-        for e in ['decompyle3', 'uncompyle6']:
-            try:
-                dc = getattr(main, F'_{e}')
-                if isinstance(dc, property):
-                    dc = dc.fget()
-            except ImportError:
-                errors += F'# The decompiler {dc} is not installed.\n'
-            else:
-                engines['decompyle3'] = dc
-        if not engines:
-            errors += '# (all missing, install one of the above to enable decompilation)'
         for name, engine in engines.items():
             with io.StringIO(newline='') as output, NoLogging(NoLogging.Mode.ALL):
                 try:
@@ -127,7 +150,7 @@ def decompile_buffer(buffer: Union[Code, ByteString], file_name: Optional[str] =
         output.write(errors)
         output.write('# Generating Disassembly:\n\n')
         for code in codes:
-            instructions = list(main._xdis.std.Bytecode(code.container))
+            instructions = list(disassemble_code(code.container, code.version))
             width_offset = max(len(str(i.offset)) for i in instructions)
             for i in instructions:
                 opname = normalize_word_separators(i.opname, '.').lower()
@@ -163,15 +186,15 @@ class PzType(enum.IntEnum):
 class PiMeta:
     type: PiType
     name: str
-    data: Union[Callable[[], ByteString], ByteString]
+    data: Union[Callable[[], ByteStr], ByteStr]
 
-    def unpack(self) -> ByteString:
+    def unpack(self) -> ByteStr:
         if callable(self.data):
             self.data = self.data()
         return self.data
 
 
-def make_decompiled_item(name: str, data: ByteString, *magics) -> PiMeta:
+def make_decompiled_item(name: str, data: ByteStr, *magics) -> PiMeta:
 
     def extract(data=data, magics=magics):
         error = None
@@ -348,7 +371,7 @@ class PyInstallerArchiveEpilogue(Struct):
         position = reader.tell()
         try:
             libname, t, rest = reader.read_bytes(64).partition(B'\0')
-        except EOF:
+        except EOFError:
             reader.seekset(position)
             return None
         try:
@@ -361,7 +384,8 @@ class PyInstallerArchiveEpilogue(Struct):
             return None
         return libname
 
-    def __init__(self, reader: StructReader, offset: int, unmarshal: Unmarshal = Unmarshal.No):
+    def __init__(self, reader: StructReader, offset: int, unmarshal: Unmarshal = Unmarshal.No, decompile: bool = False):
+        self.decompile = decompile
         reader.bigendian = True
         reader.seekset(offset)
         self.reader = reader
@@ -383,7 +407,7 @@ class PyInstallerArchiveEpilogue(Struct):
         while reader.tell() < toc_end:
             try:
                 entry = PiTOCEntry(reader)
-            except EOF:
+            except EOFError:
                 xtpyi.logger.warning('end of file while reading TOC')
                 break
             except Exception as error:
@@ -439,14 +463,18 @@ class PyInstallerArchiveEpilogue(Struct):
             del self.files[extracted.name]
             extracted.name = F'{name}.pyc'
             self.files[extracted.name] = extracted
+            is_crypto_key = name.endswith('crypto_key')
 
             if len(magics) == 1 and data[:4] != magics[0]:
                 extracted.data = magics[0] + data
-            decompiled = make_decompiled_item(name, data, *magics)
-            if entry.type is PiType.SOURCE:
-                decompiled.type = PiType.USERCODE
-            self.files[F'{name}.py'] = decompiled
-            if name.endswith('crypto_key'):
+
+            if is_crypto_key or self.decompile:
+                decompiled = make_decompiled_item(name, data, *magics)
+                if entry.type is PiType.SOURCE:
+                    decompiled.type = PiType.USERCODE
+                self.files[decompiled.name] = decompiled
+
+            if is_crypto_key:
                 for key in decompiled.unpack() | carve('string', decode=True):
                     if len(key) != 0x10:
                         continue
@@ -493,9 +521,10 @@ class xtpyi(ArchiveUnit):
     def __init__(
         self, *paths, list=False, join_path=False, drop_path=False, fuzzy=0, exact=False, regex=False,
         path=b'path', date=b'date',
+        decompile: Arg.Switch('-c', help='Attempt to decompile PYC files.'),
         user_code: Arg.Switch('-u', group='FILTER', help=(
             'Extract only source code files from the root of the archive. These usually implement '
-            'the actual domain logic.')) = False,
+            'the actual domain logic. This implies the --decompile option.')) = False,
         unmarshal: Arg('-y', action='count', group='FILTER', help=(
             '(DANGEROUS) Unmarshal embedded PYZ archives. Warning: Maliciously crafted packages can '
             'potentially exploit this to execute code. It is advised to only use this option inside '
@@ -512,6 +541,7 @@ class xtpyi(ArchiveUnit):
             regex=regex,
             path=path,
             date=date,
+            decompile=decompile,
             unmarshal=unmarshal,
             user_code=user_code,
         )
@@ -522,6 +552,7 @@ class xtpyi(ArchiveUnit):
         import xdis.magics
         import xdis.marsh
         import xdis.op_imports
+        import xdis.version_info
         import xdis
         A, B, C, *_ = sys.version_info
         version = F'{A}.{B}.{C}'
@@ -572,15 +603,17 @@ class xtpyi(ArchiveUnit):
             for position in positions:
                 self.log_info(F'magic signature found at offset 0x{position:0{width}X}')
             self.log_warn(F'found {len(positions) - 1} potential PyInstaller epilogue markers; using last one.')
-        archive = PyInstallerArchiveEpilogue(view, positions[-1], mode)
+        decompile = self.args.decompile
+        uc_target = PiType.USERCODE if decompile else PiType.SOURCE
+        archive = PyInstallerArchiveEpilogue(view, positions[-1], mode, decompile)
         for name, file in archive.files.items():
             if self.args.user_code:
-                if file.type != PiType.USERCODE:
+                if file.type != uc_target:
                     continue
                 if name.startswith('pyiboot'):
                     continue
             yield self._pack(name, None, file.data, type=file.type.name)
 
     @classmethod
-    def handles(cls, data: ByteString) -> Optional[bool]:
+    def handles(cls, data: ByteStr) -> Optional[bool]:
         return PyInstallerArchiveEpilogue.MagicSignature in data

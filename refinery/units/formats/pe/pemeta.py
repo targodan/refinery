@@ -6,7 +6,7 @@ import re
 
 from contextlib import suppress
 from importlib import resources
-from datetime import datetime, timezone
+from datetime import timedelta
 from dataclasses import dataclass
 from enum import Enum
 
@@ -23,6 +23,7 @@ from refinery.lib.dotnet.header import DotNetHeader
 from refinery.units import Arg, Unit
 from refinery.units.sinks.ppjson import ppjson
 from refinery.units.formats.pe import get_pe_size
+from refinery.lib.tools import date_from_timestamp
 
 from refinery import data
 
@@ -146,26 +147,28 @@ class pemeta(Unit):
     extracted.
     """
     def __init__(
-        self, all : Arg('-c', '--custom',
-            help='Unless enabled, all default categories will be extracted.') = True,
-        debug      : Arg('-D', help='Parse the PDB path from the debug directory.') = False,
-        dotnet     : Arg('-N', help='Parse the .NET header.') = False,
-        signatures : Arg('-S', help='Parse digital signatures.') = False,
-        timestamps : Arg('-T', help='Extract time stamps.') = False,
-        version    : Arg('-V', help='Parse the VERSION resource.') = False,
-        header     : Arg('-H', help='Parse data from the PE header.') = False,
-        exports    : Arg('-E', help='List all exported functions.') = False,
-        imports    : Arg('-I', help='List all imported functions.') = False,
-        tabular    : Arg('-t', help='Print information in a table rather than as JSON') = False,
-        timeraw    : Arg('-r', help='Extract time stamps as numbers instead of human-readable format.') = False,
+        self, custom : Arg('-c', '--custom',
+            help='Unless enabled, all default categories will be extracted.') = False,
+        debug      : Arg.Switch('-D', help='Parse the PDB path from the debug directory.') = False,
+        dotnet     : Arg.Switch('-N', help='Parse the .NET header.') = False,
+        signatures : Arg.Switch('-S', help='Parse digital signatures.') = False,
+        timestamps : Arg.Counts('-T', help='Extract time stamps. Specify twice for more detail.') = 0,
+        version    : Arg.Switch('-V', help='Parse the VERSION resource.') = False,
+        header     : Arg.Switch('-H', help='Parse base data from the PE header.') = False,
+        exports    : Arg.Counts('-E', help='List all exported functions. Specify twice to include addresses.') = 0,
+        imports    : Arg.Counts('-I', help='List all imported functions. Specify twice to include addresses.') = 0,
+        tabular    : Arg.Switch('-t', help='Print information in a table rather than as JSON') = False,
+        timeraw    : Arg.Switch('-r', help='Extract time stamps as numbers instead of human-readable format.') = False,
     ):
+        if not custom and not any((debug, dotnet, signatures, timestamps, version, header)):
+            debug = dotnet = signatures = timestamps = version = header = True
         super().__init__(
-            debug=all or debug,
-            dotnet=all or dotnet,
-            signatures=all or signatures,
-            timestamps=all or timestamps,
-            version=all or version,
-            header=all or header,
+            debug=debug,
+            dotnet=dotnet,
+            signatures=signatures,
+            timestamps=timestamps,
+            version=version,
+            header=header,
             imports=imports,
             exports=exports,
             timeraw=timeraw,
@@ -188,7 +191,7 @@ class pemeta(Unit):
     @classmethod
     def parse_signature(cls, data: bytearray) -> dict:
         """
-        Extracts a JSON-serializable and human readable dictionary with information about
+        Extracts a JSON-serializable and human-readable dictionary with information about
         time stamp and code signing certificates that are attached to the input PE file.
         """
         from refinery.units.formats.pkcs7 import pkcs7
@@ -282,9 +285,32 @@ class pemeta(Unit):
             return info
         return info
 
+    def _pe_characteristics(self, pe: PE):
+        return {name for name, mask in image_characteristics
+            if pe.FILE_HEADER.Characteristics & mask}
+
+    def _pe_address_width(self, pe: PE, default=16) -> int:
+        if 'IMAGE_FILE_16BIT_MACHINE' in self._pe_characteristics(pe):
+            return 4
+        elif MACHINE_TYPE[pe.FILE_HEADER.Machine] in ['IMAGE_FILE_MACHINE_I386']:
+            return 8
+        elif MACHINE_TYPE[pe.FILE_HEADER.Machine] in [
+            'IMAGE_FILE_MACHINE_AMD64',
+            'IMAGE_FILE_MACHINE_IA64',
+        ]:
+            return 16
+        else:
+            return default
+
+    def _vint(self, pe: PE, value: int):
+        if not self.args.tabular:
+            return value
+        aw = self._pe_address_width(pe)
+        return F'0x{value:0{aw}X}'
+
     def parse_version(self, pe: PE, data=None) -> dict:
         """
-        Extracts a JSON-serializable and human readable dictionary with information about
+        Extracts a JSON-serializable and human-readable dictionary with information about
         the version resource of an input PE file, if available.
         """
         pe.parse_data_directories(directories=[DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_RESOURCE']])
@@ -320,35 +346,50 @@ class pemeta(Unit):
         else:
             return string_table_entries
 
-    def parse_exports(self, pe: PE, data=None) -> list:
+    def parse_exports(self, pe: PE, data=None, include_addresses=False) -> list:
         pe.parse_data_directories(directories=[DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+        base = pe.OPTIONAL_HEADER.ImageBase
         info = []
         for k, exp in enumerate(pe.DIRECTORY_ENTRY_EXPORT.symbols):
             if not exp.name:
-                info.append(F'@{k}')
+                name = F'@{k}'
             else:
-                info.append(exp.name.decode('ascii'))
+                name = exp.name.decode('ascii')
+            item = {'Name': name, 'Address': self._vint(pe, exp.address + base)} if include_addresses else name
+            info.append(item)
         return info
 
-    def parse_imports(self, pe: PE, data=None) -> list:
+    def parse_imports(self, pe: PE, data=None, include_addresses=False) -> list:
         info = {}
         dirs = []
         for name in [
             'DIRECTORY_ENTRY_IMPORT',
             'DIRECTORY_ENTRY_DELAY_IMPORT',
-            'DIRECTORY_ENTRY_BOUND_IMPORT',
         ]:
             pe.parse_data_directories(directories=[DIRECTORY_ENTRY[F'IMAGE_{name}']])
             with suppress(AttributeError):
                 dirs.append(getattr(pe, name))
+        self.log_warn(dirs)
         for idd in itertools.chain(*dirs):
-            dll = idd.dll.decode('ascii')
+            dll: bytes = idd.dll
+            dll = dll.decode('ascii')
             if dll.lower().endswith('.dll'):
-                dll = dll[:-4]
-            imports = info.setdefault(dll, [])
-            for imp in idd.imports:
-                name = imp.name and imp.name.decode('ascii') or F'@{imp.ordinal}'
-                imports.append(name)
+                dll = dll[:~3]
+            imports: list[str] = info.setdefault(dll, [])
+            with suppress(AttributeError):
+                symbols = idd.imports
+            with suppress(AttributeError):
+                symbols = idd.entries
+            try:
+                for imp in symbols:
+                    name: bytes = imp.name
+                    name = name and name.decode('ascii') or F'@{imp.ordinal}'
+                    if not include_addresses:
+                        imports.append(name)
+                    else:
+                        imports.append(dict(Name=name, Address=self._vint(pe, imp.address)))
+            except Exception as e:
+                self.log_warn(F'error parsing {name}: {e!s}')
         return info
 
     def parse_header(self, pe: PE, data=None) -> dict:
@@ -390,6 +431,7 @@ class pemeta(Unit):
 
         rich_header = pe.parse_rich_header()
         rich = []
+
         if rich_header:
             it = rich_header.get('values', [])
             if self.args.tabular:
@@ -411,10 +453,7 @@ class pemeta(Unit):
                     })
             header_information['RICH'] = rich
 
-        characteristics = [
-            name for name, mask in image_characteristics
-            if pe.FILE_HEADER.Characteristics & mask
-        ]
+        characteristics = self._pe_characteristics(pe)
         for typespec, flag in {
             'EXE': 'IMAGE_FILE_EXECUTABLE_IMAGE',
             'DLL': 'IMAGE_FILE_DLL',
@@ -422,25 +461,15 @@ class pemeta(Unit):
         }.items():
             if flag in characteristics:
                 header_information['Type'] = typespec
-        address_width = None
-        if 'IMAGE_FILE_16BIT_MACHINE' in characteristics:
-            address_width = 4
-        elif MACHINE_TYPE[pe.FILE_HEADER.Machine] in ['IMAGE_FILE_MACHINE_I386']:
-            address_width = 8
-        elif MACHINE_TYPE[pe.FILE_HEADER.Machine] in [
-            'IMAGE_FILE_MACHINE_AMD64',
-            'IMAGE_FILE_MACHINE_IA64',
-        ]:
-            address_width = 16
-        if address_width:
-            header_information['Bits'] = 4 * address_width
-        else:
-            address_width = 16
-        header_information['ImageBase'] = F'0x{pe.OPTIONAL_HEADER.ImageBase:0{address_width}X}'
+
+        base = pe.OPTIONAL_HEADER.ImageBase
+        header_information['ImageBase'] = self._vint(pe, base)
         header_information['ImageSize'] = get_pe_size(pe)
+        header_information['Bits'] = 4 * self._pe_address_width(pe, 16)
+        header_information['EntryPoint'] = self._vint(pe, pe.OPTIONAL_HEADER.AddressOfEntryPoint + base)
         return header_information
 
-    def parse_time_stamps(self, pe: PE, raw_time_stamps: bool) -> dict:
+    def parse_time_stamps(self, pe: PE, raw_time_stamps: bool, more_detail: bool) -> dict:
         """
         Extracts time stamps from the PE header (link time), as well as from the imports,
         exports, debug, and resource directory. The resource time stamp is also parsed as
@@ -449,16 +478,13 @@ class pemeta(Unit):
         if raw_time_stamps:
             def dt(ts): return ts
         else:
-            def dt(ts):
-                # parse as UTC but then forget time zone information
-                return datetime.fromtimestamp(
-                    ts,
-                    tz=timezone.utc
-                ).replace(tzinfo=None)
+            dt = date_from_timestamp
 
         pe.parse_data_directories(directories=[
             DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT'],
             DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT'],
+            DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT'],
+            DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT'],
             DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_DEBUG'],
             DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_RESOURCE']
         ])
@@ -468,13 +494,35 @@ class pemeta(Unit):
         with suppress(AttributeError):
             info.update(Linker=dt(pe.FILE_HEADER.TimeDateStamp))
 
-        with suppress(AttributeError):
-            for entry in pe.DIRECTORY_ENTRY_IMPORT:
-                info.update(Import=dt(entry.TimeDateStamp()))
-
-        with suppress(AttributeError):
-            for entry in pe.DIRECTORY_ENTRY_DEBUG:
-                info.update(DbgDir=dt(entry.struct.TimeDateStamp))
+        for dir_name, _dll, info_key in [
+            ('DIRECTORY_ENTRY_IMPORT',       'dll',  'Import'), # noqa
+            ('DIRECTORY_ENTRY_DELAY_IMPORT', 'dll',  'Symbol'), # noqa
+            ('DIRECTORY_ENTRY_BOUND_IMPORT', 'name', 'Module'), # noqa
+        ]:
+            impts = {}
+            for entry in getattr(pe, dir_name, []):
+                ts = 0
+                with suppress(AttributeError):
+                    ts = entry.struct.dwTimeDateStamp
+                with suppress(AttributeError):
+                    ts = entry.struct.TimeDateStamp
+                if ts == 0 or ts == 0xFFFFFFFF:
+                    continue
+                name = getattr(entry, _dll, B'').decode()
+                if name.lower().endswith('.dll'):
+                    name = name[:-4]
+                impts[name] = dt(ts)
+            if not impts:
+                continue
+            if not more_detail:
+                dmin = min(impts.values())
+                dmax = max(impts.values())
+                small_delta = 2 * 60 * 60
+                if not raw_time_stamps:
+                    small_delta = timedelta(seconds=small_delta)
+                if dmax - dmin < small_delta:
+                    impts = dmin
+            info[info_key] = impts
 
         with suppress(AttributeError):
             Export = pe.DIRECTORY_ENTRY_EXPORT.struct.TimeDateStamp
@@ -490,6 +538,10 @@ class pemeta(Unit):
                     info.update(RsrcTS=dt(res_timestamp))
 
         def norm(value):
+            if isinstance(value, list):
+                return [norm(v) for v in value]
+            if isinstance(value, dict):
+                return {k: norm(v) for k, v in value.items()}
             if isinstance(value, int):
                 return value
             return str(value)
@@ -498,7 +550,7 @@ class pemeta(Unit):
 
     def parse_dotnet(self, pe: PE, data):
         """
-        Extracts a JSON-serializable and human readable dictionary with information about
+        Extracts a JSON-serializable and human-readable dictionary with information about
         the .NET metadata of an input PE file.
         """
         header = DotNetHeader(data, pe=pe)
@@ -524,8 +576,8 @@ class pemeta(Unit):
             )
 
         try:
-            entry = header.head.EntryPointToken + pe.OPTIONAL_HEADER.ImageBase
-            info.update(EntryPoint=F'0x{entry:08X}')
+            entry = self._vint(pe, header.head.EntryPointToken + pe.OPTIONAL_HEADER.ImageBase)
+            info.update(EntryPoint=entry)
         except AttributeError:
             pass
 
@@ -567,8 +619,11 @@ class pemeta(Unit):
             if not switch:
                 continue
             self.log_debug(F'parsing: {name}')
+            args = pe, data
+            if switch > 1:
+                args = *args, True
             try:
-                info = resolver(pe, data)
+                info = resolver(*args)
             except Exception as E:
                 self.log_info(F'failed to obtain {name}: {E!s}')
                 continue
@@ -583,7 +638,7 @@ class pemeta(Unit):
                 signature = self.parse_signature(next(data | pesig))
 
         if self.args.timestamps:
-            ts = self.parse_time_stamps(pe, self.args.timeraw)
+            ts = self.parse_time_stamps(pe, self.args.timeraw, self.args.timestamps > 1)
             with suppress(KeyError):
                 ts.update(Signed=signature['Timestamp'])
             result.update(TimeStamp=ts)

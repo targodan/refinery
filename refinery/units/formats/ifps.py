@@ -381,28 +381,31 @@ class DeclSpec:
         return self.represent(self.name or '(*)')
 
     @classmethod
-    def ParseF(cls, reader: StructReader[bytes]):
-        def readcc():
+    def ParseF(cls, reader: StructReader[bytes], load_flags: bool):
+        def ascii():
+            return reader.read_c_string('latin1')
+
+        def boolean():
+            return bool(reader.u8())
+
+        def cc():
             return {
                 0: 'register',
                 1: 'pascal',
                 2: 'cdecl',
                 3: 'stdcall',
             }.get(reader.u8(), cls.calling_convention)
+
         kw = {}
         parameters = None
         if reader.peek(4) == b'dll:':
             reader.seekrel(4)
             if reader.peek(6) == B'files:':
                 reader.seekrel(6)
-            kw.update(
-                module=reader.read_c_string('latin1'),
-                name=reader.read_c_string('latin1'),
-                calling_convention=readcc(),
-                delay_load=bool(reader.u8()),
-                load_with_altered_search_path=bool(reader.u8())
-            )
-            void = not reader.u8()
+            kw.update(module=ascii(), name=ascii(), calling_convention=cc())
+            if load_flags:
+                kw.update(delay_load=boolean(), load_with_altered_search_path=boolean())
+            void = not boolean()
         elif reader.peek(6) == b'class:':
             reader.seekrel(6)
             if reader.remaining_bytes == 1:
@@ -420,7 +423,7 @@ class DeclSpec:
                 if name[-1] == '@':
                     kw.update(is_property=True)
                     name = name[:-1]
-                kw.update(name=name, calling_convention=readcc())
+                kw.update(name=name, calling_convention=cc())
                 void = not reader.u8()
         else:
             void = not reader.u8()
@@ -447,16 +450,26 @@ class DeclSpec:
 
 class Function(NamedTuple):
     name: str
-    decl: DeclSpec
+    decl: Optional[DeclSpec]
     body: Optional[List[Instruction]] = None
     exported: bool = False
     attributes: Optional[List[Attribute]] = None
 
     def reference(self) -> str:
+        if self.decl is None:
+            return self.name
         return self.decl.represent(self.name, ref=True)
 
     def __repr__(self):
+        if self.decl is None:
+            return F'symbol {self.name}'
         return self.decl.represent(self.name)
+
+    @property
+    def type(self):
+        if self.decl is None:
+            return 'symbol'
+        return self.decl.type
 
 
 class Variable(NamedTuple):
@@ -589,6 +602,10 @@ class IFPSFile(Struct):
         self._load_functions()
         self._load_variables()
 
+    @property
+    def _load_flags(self):
+        return self.version >= 23
+
     def _load_types(self):
         reader = self.reader
         types = self.types
@@ -624,6 +641,8 @@ class IFPSFile(Struct):
                 t = TGeneric(code, symbol=code.name)
             if exported:
                 t.symbol = reader.read_length_prefixed_ascii()
+                if self.version <= 21:
+                    t.name = reader.read_length_prefixed_ascii()
             types.append(t)
             if self.version >= 21:
                 t.attributes = list(self._read_attributes())
@@ -687,7 +706,8 @@ class IFPSFile(Struct):
             if imported:
                 name = reader.read_length_prefixed_ascii(8)
                 if exported:
-                    decl = DeclSpec.ParseF(StructReader(bytes(reader.read_length_prefixed())))
+                    read = StructReader(bytes(reader.read_length_prefixed()))
+                    decl = DeclSpec.ParseF(read, self._load_flags)
             else:
                 offset = reader.u32()
                 size = reader.u32()
@@ -752,7 +772,6 @@ class IFPSFile(Struct):
 
     def _parse_bytecode(self, data: memoryview) -> Generator[Instruction, None, None]:
         disassembly: Dict[int, Instruction] = OrderedDict()
-        stackdepth = 0
         reader = StructReader(data)
 
         argcount = {
@@ -780,7 +799,7 @@ class IFPSFile(Struct):
             aryness = argcount.get(code)
             if aryness is not None:
                 arg(aryness)
-            elif code in (Op.Ret, Op.Nop):
+            elif code in (Op.Ret, Op.Nop, Op.Pop):
                 pass
             elif code is Op.Calculate:
                 infix = ['+', '-', '*', '/', '%', '<<', '>>', '&', '|', '^'][reader.u8()]
@@ -789,12 +808,7 @@ class IFPSFile(Struct):
                 b = self._read_operand(reader)
                 args.extend((a, infix, b))
             elif code in (Op.Push, Op.PushVar):
-                stackdepth += 1
                 arg()
-            elif code is Op.Pop:
-                if stackdepth < 1:
-                    raise RuntimeError(F'Stack grew negative at instruction {len(disassembly) + 1}.')
-                stackdepth -= 1
             elif code in (Op.Jump, Op.JumpFlag):
                 target = reader.i32()
                 args.append(reader.tell() + target)
@@ -806,18 +820,15 @@ class IFPSFile(Struct):
                 args.append(reader.tell() + target)
                 args.append(val)
             elif code is Op.JumpPop1:
-                stackdepth -= 1
                 target = reader.i32()
                 args.append(reader.tell() + target)
             elif code is Op.JumpPop2:
-                stackdepth -= 2
                 target = reader.i32()
                 args.append(reader.tell() + target)
             elif code is Op.StackType:
                 args.append(self._read_variant(reader.u32()))
                 args.append(reader.u32())
             elif code is Op.PushType:
-                stackdepth += 1
                 args.append(self.types[reader.u32()])
             elif code is Op.Compare:
                 infix = ['>=', '<=', '>', '<', '!=', '==', 'in', 'is'][reader.u8()]
@@ -888,7 +899,7 @@ class IFPSFile(Struct):
                 output.write(F'begin {function!s}\n')
                 for instruction in function.body:
                     output.write(F'{_TAB}0x{instruction.offset:0{width}X}{_TAB}{instruction!s}\n')
-                output.write(F'end {function.decl.type}\n\n')
+                output.write(F'end {function.type}\n\n')
 
         return output.getvalue()
 

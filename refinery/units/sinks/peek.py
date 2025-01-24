@@ -6,11 +6,13 @@ import sys
 import os
 import textwrap
 import codecs
+import itertools
+import collections
 
 from refinery.units.sinks import Arg, HexViewer
 from refinery.lib.meta import ByteStringWrapper, metavars, CustomStringRepresentation, SizeInt
 from refinery.lib.types import INF
-from refinery.lib.tools import get_terminal_size, isbuffer, lookahead
+from refinery.lib.tools import get_terminal_size, isbuffer
 from refinery.lib.environment import environment
 
 
@@ -96,17 +98,17 @@ class peek(HexViewer):
             self.log_info('forwarding input to next unit')
             yield data
 
-    def _peekmeta(self, linewidth, sep, _x_peek=None, **meta) -> Generator[str, None, None]:
-        if not meta and not _x_peek:
+    def _peekmeta(self, linewidth, sep, meta: dict, peek=None) -> Generator[str, None, None]:
+        if not meta and not peek:
             return
         width = max((len(name) for name in meta), default=0)
         separators = iter([sep])
-        if _x_peek is not None:
-            if len(_x_peek) > linewidth:
-                _x_peek = _x_peek[:linewidth - 3] + '...'
+        if peek is not None:
+            if len(peek) > linewidth:
+                peek = peek[:linewidth - 3] + '...'
             yield from separators
-            yield _x_peek
-        for name in sorted(meta):
+            yield peek
+        for name in sorted(meta, key=lambda s: (len(s) <= 3, s)):
             value = meta[name]
             if value is None:
                 continue
@@ -160,14 +162,18 @@ class peek(HexViewer):
         decoded = decoded.splitlines(False)
         if not wrap:
             for k, line in enumerate(decoded):
+                line = line.replace('\t', '\x20' * 4)
                 if len(line) <= width:
                     continue
+                clipped = line[:width - 3]
                 if self.args.gray:
-                    decoded[k] = line[:width]
+                    color = ''
+                    reset = ''
                 else:
-                    c = self._colorama
-                    d = line.replace('\t', '    ')[:width - 1]
-                    decoded[k] = F'{d}{c.Fore.LIGHTRED_EX}…{c.Style.RESET_ALL}'
+                    colorama = self._colorama
+                    color = colorama.Fore.LIGHTRED_EX
+                    reset = colorama.Style.RESET_ALL
+                decoded[k] = F'{clipped}{color}...{reset}'
             return decoded[:abs(linecount)]
         for paragraph in decoded:
             if not remaining:
@@ -266,7 +272,7 @@ class peek(HexViewer):
             if self.args.meta > 2:
                 for name in meta.derivations:
                     meta[name]
-            for line in self._peekmeta(metrics.hexdump_width, line, _x_peek=peek, **meta):
+            for line in self._peekmeta(metrics.hexdump_width, line, meta, peek=peek):
                 empty = False
                 yield line
 
@@ -282,7 +288,7 @@ class peek(HexViewer):
                     brief = F'#{index:03d}: {brief}'
                 yield brief
 
-        if final and not empty:
+        if final and (self.args.bare or not empty):
             yield separator()
 
     def filter(self, chunks):
@@ -291,11 +297,26 @@ class peek(HexViewer):
         except ImportError:
             pass
         discarded = 0
-        for final, item in lookahead(chunks):
-            item.temp = final
-            if not item.visible and self.isatty:
+        it = iter(chunks)
+        buffer = collections.deque(itertools.islice(it, 0, 2))
+        buffer.reverse()
+
+        while buffer:
+            if self.isatty and not buffer[0].visible:
+                buffer.popleft()
                 discarded += 1
             else:
-                yield item
+                item = buffer.pop()
+                last = not bool(buffer)
+                item.temp = last
+                if not item.visible and self.isatty:
+                    discarded += 1
+                else:
+                    yield item
+            try:
+                buffer.appendleft(next(it))
+            except StopIteration:
+                pass
+
         if discarded:
             self.log_warn(F'discarded {discarded} invisible chunks to prevent them from leaking into the terminal.')

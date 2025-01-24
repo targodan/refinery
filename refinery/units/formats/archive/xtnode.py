@@ -8,7 +8,7 @@ import json
 
 from refinery.units.formats.archive import Arg, ArchiveUnit, UnpackResult
 from refinery.units.encoding.esc import esc
-from refinery.lib.structures import EOF, StructReader
+from refinery.lib.structures import StructReader
 from refinery.lib.patterns import formats
 from refinery.lib.types import ByteStr, JSON
 from refinery.units.pattern.carve_json import JSONCarver
@@ -110,7 +110,7 @@ class xtnode(ArchiveUnit):
                 reader = StructReader(view[start:end])
                 code = reader.read_exactly(code_size)
                 blob = reader.read_exactly(blob_size)
-            except EOF:
+            except EOFError:
                 self.log_debug(F'found marker at 0x{marker.start():X}, but failed to read data')
                 continue
             else:
@@ -127,13 +127,13 @@ class xtnode(ArchiveUnit):
                     yield UnpackResult(path, blob[offset:end])
 
     def _unpack_pkg(self, data: ByteStr):
-        def _extract_coordinates(*v):
+        def _extract_coordinates(*v: bytes):
             for name in v:
-                pattern = BR'%s\s{0,3}=\s{0,3}(%s)' % (name, formats.string)
-                value, = re.findall(pattern, data)
-                yield int((value | esc(quoted=True) | str).strip())
+                pattern = name + BR'''\s{0,3}=\s{0,3}(['"])([\s\d]+)\1'''
+                value, = re.finditer(pattern, data)
+                yield int(value.group(2).decode('utf8').strip(), 0)
 
-        def _extract_data(*v):
+        def _extract_data(*v: bytes):
             try:
                 offset, length = _extract_coordinates(*v)
             except Exception:

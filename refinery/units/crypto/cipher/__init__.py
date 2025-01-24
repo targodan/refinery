@@ -49,9 +49,10 @@ class CipherUnit(Unit, abstract=True):
         raise NotImplementedError
 
     def process(self, data: ByteString) -> ByteString:
-        if self.key_size and len(self.args.key) not in self.key_size:
+        ks = self.key_size
+        if ks and len(self.args.key) not in ks:
             import itertools
-            key_size_iter = iter(self.key_size)
+            key_size_iter = iter(ks)
             key_size_options = [str(k) for k in itertools.islice(key_size_iter, 0, 5)]
             try:
                 next(key_size_iter)
@@ -59,6 +60,8 @@ class CipherUnit(Unit, abstract=True):
                 pt = '.'
             else:
                 pt = ', ...'
+                if isinstance(ks, range):
+                    pt = F'{pt}, {ks.stop - 1}'
             if len(key_size_options) == 1:
                 msg = F'{self.name} requires a key size of {key_size_options[0]}'
             else:
@@ -385,7 +388,7 @@ class LatinCipherUnit(StreamCipherUnit, abstract=True):
         nonce: Arg(help='The nonce. Default is the string {default}.') = B'REFINERY',
         magic: Arg('-m', help='The magic constant; depends on the key size by default.') = B'',
         offset: Arg.Number('-x', help='Optionally specify the stream index, default is {default}.') = 0,
-        rounds: Arg.Number('-r', help='The number of rounds. Has to be an even number.') = 20,
+        rounds: Arg.Number('-r', help='The number of rounds. Has to be an even number. Default is {default}.') = 20,
     ):
         super().__init__(
             key=key,

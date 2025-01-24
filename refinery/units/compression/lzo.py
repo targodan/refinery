@@ -5,7 +5,7 @@ from typing import ByteString, Generator, Optional
 from zlib import adler32, crc32
 
 from refinery.units import Unit
-from refinery.lib.structures import EOF, MemoryFile, StreamDetour, Struct, StructReader
+from refinery.lib.structures import MemoryFile, StreamDetour, Struct, StructReader
 from refinery.lib.tools import date_from_timestamp
 
 
@@ -138,7 +138,7 @@ class LZO(Struct):
         while not self.reader.eof:
             try:
                 chunk = LZOChunk(self.reader, self.flags)
-            except EOF:
+            except EOFError:
                 break
             if not chunk.data:
                 break

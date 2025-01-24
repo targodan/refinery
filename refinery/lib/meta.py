@@ -121,7 +121,7 @@ import itertools
 import os
 
 from io import StringIO
-from urllib.parse import quote_from_bytes, unquote_to_bytes
+from urllib.parse import unquote_to_bytes
 from typing import Callable, Dict, List, Tuple, Any, Iterable, Optional, ByteString, Union, TYPE_CHECKING
 
 from refinery.lib.structures import MemoryFile
@@ -188,6 +188,12 @@ class ByteStringWrapper(bytearray, CustomStringRepresentation):
         codecs.lookup(c).name: p
         for c, p in [('utf8', 's'), ('latin1', 'a'), ('utf-16le', 'u')]
     }
+
+    @classmethod
+    def Wrap(cls, string: Union[str, ByteString, ByteStringWrapper], codec: Optional[str] = None):
+        if isinstance(string, cls):
+            return string
+        return cls(string, codec=codec)
 
     def __init__(self, string: Union[str, ByteString], codec: Optional[str] = None):
         if isinstance(string, str):
@@ -273,12 +279,7 @@ class ByteStringWrapper(bytearray, CustomStringRepresentation):
             elif prefix != 's' or self.requires_prefix(representation):
                 representation = F'{prefix}:{representation}'
         if representation is None:
-            if sum(_IS_PRINT_SAFE[c] for c in self) > len(self) * 0.6:
-                from urllib.parse import quote_from_bytes
-                quoted = quote_from_bytes(self, _PRINT_SAFE)
-                representation = F'q:{quoted}'
-            else:
-                representation = F'h:{self.hex()}'
+            representation = F'h:{self.hex()}'
         self._representation = representation
         return representation
 
@@ -322,7 +323,7 @@ def check_variable_name(name: Optional[str], allow_derivations=False) -> None:
 
 class SizeInt(int, CustomStringRepresentation):
     """
-    The string representation of this int class is a a human-readable expression of size, using
+    The string representation of this int class is a human-readable expression of size, using
     common units such as kB and MB.
     """
     width = 9
@@ -361,7 +362,7 @@ class TerseSizeInt(SizeInt):
 
 class Percentage(float, CustomStringRepresentation):
     """
-    The string representation of this floating point class is a a human-readable expression of a
+    The string representation of this floating point class is a human-readable expression of a
     percentage. The string representation is a common decimal with 4 digits precision, but casting
     the object using `repr` will yield a percentage.
     """
@@ -514,58 +515,57 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
             return scope - k + 1
         return scope
 
-    def serialize(self, scope: int) -> Dict[str, List[Tuple[bool, Any]]]:
-        if not scope:
+    def serialize(self, target_scope: int) -> Dict[str, List[Tuple[bool, Any]]]:
+        if not target_scope:
             return {}
         current_scope = self.scope
         if current_scope == 0:
-            padding = [(True, 0)] * (scope - 1)
+            padding = [(True, 0)] * (target_scope - 1)
             return {key: [(False, value)] + padding for key, value in self.current.items()}
         serializable = {key: list(stack) for key, stack in self.history.items()}
-        if scope > current_scope:
-            padding = scope - current_scope
+        if target_scope > current_scope:
+            padding = target_scope - current_scope
             for key, stack in serializable.items():
                 stack.extend(itertools.repeat((True, (current_scope - 1)), padding))
         for key, stack in serializable.items():
             if key not in self.current:
                 stack[~0] = (False, None)
-        if scope < current_scope:
+        if target_scope < current_scope:
             for key, stack in serializable.items():
-                del stack[scope:]
+                del stack[target_scope:]
         for key, value in self.current.items():
             if value is None:
                 raise RuntimeError(F'Meta variable "{key}" was set to None.')
             try:
-                spot = self.rescope[key]
+                item_scope = self.rescope[key]
             except KeyError:
-                spot = current_scope
-            finally:
-                link = None
-            if spot == current_scope and not self.updated[key]:
+                item_scope = current_scope
+            if item_scope == current_scope and not self.updated[key]:
                 continue
-            if spot > scope:
+            if item_scope > target_scope:
                 continue
-            if spot < 0:
-                raise RuntimeError('computed a negative spot for variable placement')
+            link = index = item_scope - 1
+            if index < 0:
+                raise RuntimeError('computed a negative index for variable placement')
             try:
                 stack = serializable[key]
             except KeyError:
-                serializable[key] = stack = [(False, None)] * scope
+                serializable[key] = stack = [(False, None)] * target_scope
             else:
                 for k, (is_link, v) in enumerate(stack):
-                    if k >= spot:
+                    if k > index:
                         break
                     while is_link:
                         k, is_link, v = v, *stack[v]
                     if v == value:
                         link = k
                         break
-            if link is not None:
-                stack[spot - 1] = (True, link)
+            if link < index:
+                stack[index] = (True, link)
             else:
-                stack[spot - 1] = (False, value)
-            for k in range(spot, scope):
-                stack[k] = (True, spot - 1)
+                stack[index] = (False, value)
+            for k in range(index + 1, target_scope):
+                stack[k] = (True, index)
         vanishing_variables = []
         for key, stack in serializable.items():
             if all(v is None for lnk, v in stack if not lnk):
@@ -596,7 +596,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         codec: str,
         args: Optional[Iterable] = None,
         symb: Optional[dict] = None,
-        escaped: bool = False
+        used: Optional[set] = None,
     ) -> str:
         """
         Formats the input expression like a normal Python format string expression. Certain refinery
@@ -608,14 +608,15 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         - `sha1`, `sha256`, `sha512`, and `md5` are formatted as hex strings.
         - `size` is formatted as a human-readable size with unit.
         """
-        return self.format(spec, codec, args, symb, False, escaped=escaped)
+        return self.format(spec, codec, args, symb, False, used)
 
     def format_bin(
         self,
         spec: str,
         codec: str,
         args: Optional[Iterable] = None,
-        symb: Optional[dict] = None
+        symb: Optional[dict] = None,
+        used: Optional[set] = None,
     ) -> ByteString:
         """
         Formats the input expression using a Python F-string like expression. These strings contain
@@ -634,7 +635,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         - `h`: literal is a hex-encoded binary string
         - `e`: literal is an escaped ASCII string
         """
-        return self.format(spec, codec, args, symb, True)
+        return self.format(spec, codec, args, symb, True, used)
 
     def format(
         self,
@@ -645,7 +646,6 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         binary  : bool,
         fixup   : bool = True,
         used    : Optional[set] = None,
-        escaped : bool = False
     ) -> Union[str, ByteString]:
         """
         Formats a string using Python-like string fomatting syntax. The formatter for `binary`
@@ -656,7 +656,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         """
         # prevents circular import:
         from refinery.lib.argformats import (
-            multibin, ParserError, PythonExpression, pending, Chunk)
+            DelayedNumSeqArgument, ParserError, PythonExpression, Chunk)
 
         symb = symb or {}
 
@@ -679,7 +679,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
                     with contextlib.suppress(TypeError):
                         if isinstance(value, CustomStringRepresentation):
                             continue
-                        store[key] = ByteStringWrapper(value, codec)
+                        store[key] = ByteStringWrapper.Wrap(value, codec)
 
         formatter = string.Formatter()
         autoindex = 0
@@ -693,98 +693,123 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
 
         with stream:
             for prefix, field, modifier, conversion in formatter.parse(spec):
-                output = value = None
+                def recover_placeholder():
+                    recovery = F'{{{field}'
+                    if conversion:
+                        recovery = F'{recovery}!{conversion}'
+                    if modifier:
+                        recovery = F'{recovery}:{modifier}'
+                    return F'{recovery}}}'
+
+                value = None
+
+                converter = {
+                    'a': ascii,
+                    's': str,
+                    'r': repr,
+                }.get(conversion)
+
                 if prefix:
-                    if binary:
-                        prefix = prefix.encode(codec)
-                    elif escaped:
-                        prefix = prefix.encode('raw-unicode-escape').decode('unicode-escape')
-                    stream.write(prefix)
+                    putstr(prefix)
+
                 if field is None:
                     continue
+
                 if not field:
                     if not args:
-                        raise LookupError('no positional arguments given to formatter')
+                        ph = recover_placeholder()
+                        if self.ghost:
+                            putstr(ph)
+                            continue
+                        raise LookupError(F'Spec contains placeholder {ph} but no positional arguments were given.')
                     value = args[autoindex]
                     used.add(autoindex)
                     if autoindex < len(args) - 1:
                         autoindex += 1
-                if binary and conversion:
+
+                if conversion:
                     conversion = conversion.lower()
                     if conversion == 'h':
                         value = bytes.fromhex(field)
                     elif conversion == 'q':
                         value = unquote_to_bytes(field)
-                    elif conversion == 's':
-                        value = field.encode(codec)
                     elif conversion == 'u':
                         value = field.encode('utf-16le')
-                    elif conversion == 'a':
-                        value = field.encode('latin1')
-                    elif conversion == 'e':
+                    elif conversion == 'n':
                         value = field.encode(codec).decode('unicode-escape').encode('latin1')
                 elif field in symb:
                     value = symb[field]
                     used.add(field)
+
                 if value is None:
                     with contextlib.suppress(ValueError, IndexError):
                         index = int(field, 0)
                         value = args[index]
                         used.add(index)
+
                 if value is None:
                     with contextlib.suppress(KeyError):
                         value = self[field]
                         used.add(field)
+
                 if value is None:
+                    try:
+                        field = self.format(field, codec, args, symb, False, False, used)
+                    except Exception:
+                        pass
                     try:
                         expression = PythonExpression(field, *self, *symb)
                         value = expression(self, **symb)
                     except ParserError:
-                        if not self.ghost:
-                            raise KeyError(field)
-                        putstr(F'{{{field}')
-                        if conversion:
-                            putstr(F'!{conversion}')
-                        if modifier:
-                            putstr(F':{modifier}')
-                        putstr('}')
-                        continue
-                if binary:
-                    modifier = modifier.strip()
-                    if modifier:
-                        expression = self.format(modifier, codec, args, symb, True, False, used)
-                        output = multibin(expression.decode(codec), reverse=True, seed=value)
-                        if pending(output):
-                            output = output(Chunk(value, meta=self))
-                    elif isbuffer(value):
-                        output = value
-                    elif not isinstance(value, int):
-                        with contextlib.suppress(TypeError):
-                            output = bytes(value)
-                if output is None:
-                    converter = {
-                        'a': ascii,
-                        's': str,
-                        'r': repr,
-                        'H': lambda b: b.hex().upper(),
-                        'h': lambda b: b.hex(),
-                        'u': lambda b: b.decode('utf-16le'),
-                        'e': lambda b: repr(bytes(b)).lstrip('bBrR')[1:-1],
-                        'q': lambda b: quote_from_bytes(bytes(b))
-                    }.get(conversion)
+                        ph = recover_placeholder()
+                        if self.ghost:
+                            putstr(ph)
+                            continue
+                        raise KeyError(ph)
+                    except Exception:
+                        value = B''
+
+                try:
+                    converted = ByteStringWrapper.Wrap(value)
+                except TypeError:
                     if converter:
-                        output = converter(value)
-                    elif modifier:
-                        output = value
+                        converted = converter(value)
                     elif isinstance(value, CustomStringRepresentation):
-                        output = str(value)
-                    elif isbuffer(value):
-                        output = value.decode('utf8', errors='replace')
+                        converted = str(value)
                     else:
-                        output = value
-                    output = output.__format__(modifier)
-                    if binary:
-                        output = output.encode(codec)
+                        converted = value
+
+                if binary and isbuffer(converted):
+                    output = None
+                else:
+                    try:
+                        output = converted.__format__(modifier)
+                    except Exception:
+                        if not modifier:
+                            raise
+                        output = None
+
+                if modifier and output is None:
+                    modifier = modifier.strip()
+                    expression = self.format(modifier, codec, args, symb, True, False, used)
+                    output = DelayedNumSeqArgument(
+                        expression.decode(codec), reverse=True, seed=converted)
+                    try:
+                        output = output()
+                    except Exception:
+                        output = output(Chunk(value, meta=self))
+
+                if output is None:
+                    output = converted
+
+                if not binary:
+                    if isinstance(output, (bytes, bytearray)):
+                        output = output.decode()
+                    elif not isinstance(output, str):
+                        output = str(output)
+                elif isinstance(output, str):
+                    output = output.encode()
+
                 stream.write(output)
             return stream.getvalue()
 
@@ -812,7 +837,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
             wrap = ByteStringWrapper
         if not isinstance(value, wrap):
             with contextlib.suppress(TypeError):
-                value = ByteStringWrapper(value)
+                value = wrap(value)
         return value
 
     def __setitem__(self, key, value):

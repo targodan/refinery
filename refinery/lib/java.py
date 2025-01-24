@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Parsing of the Java Class file format as per:
-https://docs.oracle.com/javase/specs/jvms/se14/html/jvms-4.html
+Parsing of the Java Class file format as per
+ [the official specification](https://docs.oracle.com/javase/specs/jvms/se14/html/jvms-4.html).
 """
 from typing import Union, Any, Dict, List, ByteString, Type, Optional, TypeVar, Generic
 from enum import IntEnum
@@ -521,7 +521,7 @@ class JvOpCode(Struct):
                 self.table = {k + low: offset for k, offset in enumerate(offsets)}
                 self.table[None] = default
             elif self.code == opc.wide:
-                argop = opc(reader.get_byte())
+                argop = opc(reader.u8())
                 self.arguments = (argop, reader.u16())
                 if argop == opc.iinc:
                     self.arguments += reader.i16(),

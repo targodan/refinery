@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import List, Optional, Type
 
-from refinery.units.formats.archive import ArchiveUnit
+from refinery.units.formats.archive import ArchiveUnit, MultipleArchives
 from refinery.units import RefineryException
 
 
@@ -68,6 +68,8 @@ class xt(ArchiveUnit):
         yield xt7z
         from refinery.units.formats.msi import xtmsi
         yield xtmsi
+        from refinery.units.formats.archive.xtmacho import xtmacho
+        yield xtmacho
         from refinery.units.formats.archive.xtnuitka import xtnuitka
         yield xtnuitka
         from refinery.units.formats.office.xtdoc import xtdoc
@@ -114,26 +116,32 @@ class xt(ArchiveUnit):
                         self.unit.log_info(F'accepted: {handler.name}')
                     try:
                         unit = handler(*pos_args, **key_args)
+                        unit.args.lenient = self.unit.args.lenient
+                        unit.args.quiet = self.unit.args.quiet
                     except TypeError as error:
                         self.unit.log_debug('handler construction failed:', error)
                         return
                     try:
+                        test_unpack = not self.unit.args.list
                         for item in unit.unpack(data):
-                            item.get_data()
+                            if test_unpack:
+                                item.get_data()
+                                test_unpack = False
                             yield item
                     except Exception as error:
                         if not self.fallback:
                             errors[handler.name] = error
-                        self.unit.log_debug('handler unpacking failed:', error)
-                        return
+                        if isinstance(error, MultipleArchives):
+                            self.unit.log_warn(error)
+                        else:
+                            self.unit.log_debug('handler unpacking failed:', error)
                     else:
                         self.success = True
-                        return
                 elif verdict is None:
                     fallback.append(handler)
 
         for handler in self.handlers():
-            self._custom_path_separator = handler._custom_path_separator
+            self.CustomPathSeparator = handler.CustomPathSeparator
             it = unpacker(handler, fallback=False)
             yield from it
             if it.success:

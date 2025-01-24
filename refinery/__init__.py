@@ -34,10 +34,10 @@ various `refinery.units.Unit`s can be combined.
 4. `refinery.units`: writing custom units, add command-line arguments, and how to use refinery
    units within Python code.
 """
-__version__ = '0.6.25'
+__version__ = '0.8.1'
 __distribution__ = 'binary-refinery'
 
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Type, TypeVar, Iterable
 from importlib import resources
 from datetime import datetime
 from threading import RLock
@@ -46,8 +46,10 @@ import pickle
 
 from refinery.units import Arg, Unit
 
+_T = TypeVar('_T')
 
-def _singleton(cls):
+
+def _singleton(cls: Type[_T]) -> _T:
     return cls()
 
 
@@ -77,17 +79,29 @@ class __unit_loader__:
         self.load()
 
     def __enter__(self):
-        return self._lock.__enter__()
+        self._lock.__enter__()
+        return self
 
     def __exit__(self, et, ev, tb):
         return self._lock.__exit__(et, ev, tb)
 
     def load(self):
         try:
-            self.units = pickle.load(self.path.open('rb'))
+            cache: dict = pickle.load(self.path.open('rb'))
         except (FileNotFoundError, EOFError):
+            cache = None
+        else:
+            try:
+                version = cache['version']
+            except KeyError:
+                cache = None
+            else:
+                if version != __version__:
+                    cache = None
+        if cache is None:
             self.reload()
         else:
+            self.units = cache['units']
             self.loaded = True
 
     def clear(self):
@@ -97,7 +111,10 @@ class __unit_loader__:
 
     def save(self):
         try:
-            pickle.dump(self.units, self.path.open('wb'))
+            pickle.dump({
+                'units': self.units,
+                'version': __version__,
+            }, self.path.open('wb'))
         except Exception:
             pass
         else:
@@ -135,7 +152,7 @@ class __pdoc__(dict):
         self._loaded = False
 
     def _strip_globals(self, hlp: str):
-        def _strip(lines):
+        def _strip(lines: Iterable[str]):
             triggered = False
             for line in lines:
                 if triggered:
@@ -154,9 +171,11 @@ class __pdoc__(dict):
         from .explore import get_help_string
         self['Unit'] = False
         self['Arg'] = False
-        with __unit_loader__:
-            for name in __unit_loader__.units:
-                unit = __unit_loader__.resolve(name)
+        with __unit_loader__ as ul:
+            for name in ul.units:
+                unit = ul.resolve(name)
+                if unit is None:
+                    continue
                 for base in unit.mro():
                     try:
                         abstractmethods: List[str] = base.__abstractmethods__
@@ -189,13 +208,13 @@ __all__ = sorted(__unit_loader__.units, key=lambda x: x.lower()) + [
 
 
 def load(name) -> Optional[Unit]:
-    with __unit_loader__:
-        return __unit_loader__.resolve(name)
+    with __unit_loader__ as ul:
+        return ul.resolve(name)
 
 
 def __getattr__(name):
-    with __unit_loader__:
-        unit = __unit_loader__.resolve(name)
+    with __unit_loader__ as ul:
+        unit = ul.resolve(name)
     if unit is None:
         raise AttributeError(name)
     return unit

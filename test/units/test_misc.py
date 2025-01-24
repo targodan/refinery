@@ -119,13 +119,6 @@ class TestMetaProperties(TestUnitBase):
         self.assertEqual(report.total_errors, 0,
             msg='Flake8 formatting errors were found.')
 
-    def test_unique_entry_point_names(self):
-        entry_points = set()
-        for entry in get_all_entry_points():
-            self.assertNotIn(entry.__qualname__, entry_points)
-            entry_points.add(entry.__qualname__)
-        self.assertGreaterEqual(len(entry_points), 10)
-
     def test_no_legacy_interfaces(self):
         for unit in get_all_entry_points():
             self.assertFalse(hasattr(unit, 'interface') and callable(unit.interface))
@@ -184,21 +177,6 @@ class TestMetaProperties(TestUnitBase):
         with self.assertRaises(Exception):
             unit(B'y')
 
-    def test_loader_imports(self):
-        from refinery.lib import loader
-        from refinery import aes
-        from refinery import rex
-        from refinery import b64
-        from refinery.units.crypto.cipher.aes import aes as aes_
-        from refinery.units.pattern.rex import rex as rex_
-        from refinery.units.encoding.b64 import b64 as b64_
-        self.assertIs(aes, aes_)
-        self.assertIs(b64, b64_)
-        self.assertIs(rex, rex_)
-        self.assertIs(aes, loader.get_entry_point('aes'))
-        self.assertIs(b64, loader.get_entry_point('b64'))
-        self.assertIs(rex, loader.get_entry_point('rex'))
-
     def test_pdoc(self):
         import refinery
         pd = refinery.__pdoc__
@@ -215,13 +193,19 @@ class TestSimpleInvertible(TestUnitBase):
         'csv',
         'dsphp',
         'hexload',
+        'iff',
+        'iffp',
+        'iffs',
+        'iffx',
         'msgpack',
+        'morse',
         'recode',
         'stretch',
         'terminate',
         'u16',
         'vaddr',
         'wshenc',
+        'xjl',
     ]
 
     def setUp(self):
@@ -299,7 +283,7 @@ class TestSimpleInvertible(TestUnitBase):
         sys_stdout = sys.stdout
         sys.stdin = dummy(MemoryFile(B'test'), False)
         sys.stdout = out = dummy(MemoryFile(), True)
-        sys.argv = ['cfmt', '=={}==', cfmt._SECRET_DEBUG_TIMING_FLAG]
+        sys.argv = ['cfmt', '=={}==']
         try:
             cfmt.run()
             self.assertEqual(out.buffer.getvalue(), b'==test==')
@@ -358,3 +342,13 @@ class TestScoping(TestUnitBase):
             self.assertFalse(refinery.__unit_loader__.reloading)
             refinery.__unit_loader__.reload()
         self.assertIs(refinery.hex, hex)
+
+    def test_nesting_for_code_chunk_to_pipeline(self):
+        from refinery.units import Chunk
+        for scope in range(4):
+            unit = self.ldu('nop')
+            data = Chunk(B'hello', [0] * scope, [True] * scope, {'tv': 7})
+            self.assertEqual(data.scope, scope)
+            test = next(data | unit)
+            self.assertEqual(test.scope, scope)
+            self.assertEqual(test['tv'], 7)
