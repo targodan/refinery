@@ -13,7 +13,7 @@ class sigan(Unit):
     def __init__(self):
         super().__init__()
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy

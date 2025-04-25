@@ -19,7 +19,7 @@ class gen(Unit):
         if self.args.time:
             self.args.sample_count = math.ceil(self.args.time * self.args.sample_rate)
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy

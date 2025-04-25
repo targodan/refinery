@@ -21,12 +21,12 @@ class fir(Unit):
             new_bands.append((float(lower), float(upper)))
         self.args.bands = new_bands
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy
 
-    @Unit.Requires('scipy', optional=False)
+    @Unit.Requires('scipy', 'default', 'extended')
     def _scipy():
         import scipy
         return scipy
