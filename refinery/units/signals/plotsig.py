@@ -19,12 +19,12 @@ class plotsig(Unit):
     def __init__(self):
         super().__init__()
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy
 
-    @Unit.Requires('matplotlib', optional=False)
+    @Unit.Requires('matplotlib', 'default', 'extended')
     def _matplotlib():
         from matplotlib import pyplot
         return pyplot

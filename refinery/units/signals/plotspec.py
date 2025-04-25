@@ -22,17 +22,17 @@ class plotspec(Unit):
                  window: Arg.Choice('-w', choices=windows) = "blackmanharris"):
         super().__init__(mode=mode, window=window)
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy
 
-    @Unit.Requires('scipy', optional=False)
+    @Unit.Requires('scipy', 'default', 'extended')
     def _scipy():
         import scipy
         return scipy
 
-    @Unit.Requires('matplotlib', optional=False)
+    @Unit.Requires('matplotlib', 'default', 'extended')
     def _matplotlib():
         from matplotlib import pyplot
         return pyplot

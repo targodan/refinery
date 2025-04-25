@@ -12,12 +12,12 @@ class decimate(Unit):
     def __init__(self, factor: Arg.Number(help="factor to decimate by")):
         super().__init__(factor=factor)
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy
 
-    @Unit.Requires('scipy', optional=False)
+    @Unit.Requires('scipy', 'default', 'extended')
     def _scipy():
         import scipy
         return scipy

@@ -14,7 +14,7 @@ class mix(Unit):
     def __init__(self, frequency: Arg.Number(help="frequency to mix with")):
         super().__init__(frequency=frequency)
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy

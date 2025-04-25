@@ -18,7 +18,7 @@ class sdriq(Unit):
     def __init__(self, ignore_checksum: Arg.Switch('-i', help="ignore checksum errors")):
         super().__init__(ignore_checksum=ignore_checksum)
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy

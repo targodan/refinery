@@ -15,7 +15,7 @@ class iq(Unit):
     def __init__(self, dtype: Arg.Choice(choices=DTYPES)):
         super().__init__(dtype=dtype)
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy

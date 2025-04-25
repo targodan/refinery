@@ -16,7 +16,7 @@ class ook(Unit):
                  ):
         super().__init__(thresholds=thresholds, codewords=codewords, slice=slice)
 
-    @Unit.Requires('numpy', optional=False)
+    @Unit.Requires('numpy', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy
