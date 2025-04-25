@@ -94,30 +94,83 @@ class TestPipelines(TestUnitBase):
 
 class TestMetaProperties(TestUnitBase):
 
-    def test_style_guide(self):
-        from flake8.api import legacy as flake8
-        from flake8.main.options import JobsArgument
-        logging.StreamHandler.terminator = '\n    '
+    def test_happy_flakes(self):
+        import pyflakes.api
+        import pyflakes.reporter
+        import io
+
         root = os.path.abspath(inspect.stack()[0][1])
         for _ in range(3):
             root = os.path.dirname(root)
 
-        rules = flake8.get_style_guide(ignore=[
-            'E128',  # A continuation line is under-indented for a visual indentation.
-            'E203',  # Colons should not have any space before them.
-            'E701',  # Multiple statements on one line (colon)
-            'E704',  # Multiple statements on one line (def)
-            'W503',  # Line break occurred before a binary operator
-            'F722',  # syntax error in forward annotation
-            'F821',  # undefined name
-            'E261',  # at least two spaces before inline comment
-        ], max_line_length=140, jobs=JobsArgument('1'))
-        report = rules.check_files(path for path in glob(
+        python_files = [path for path in glob(
             os.path.join(root, 'refinery', '**', '*.py'), recursive=True)
-            if 'thirdparty' not in path
+            if 'thirdparty' not in path]
+
+        alerts = io.StringIO()
+        errors = io.StringIO()
+
+        for path in python_files:
+            with open(path, 'r', encoding='utf8') as stream:
+                code = stream.read()
+            pyflakes.api.check(code, path, pyflakes.reporter.Reporter(alerts, errors))
+
+        error_log = errors.getvalue().strip().splitlines(False)
+        alert_log = alerts.getvalue().strip().splitlines(False)
+
+        error_log.extend(line for line in alert_log if not any(
+            ignore in line for ignore in [
+                ': undefined name',
+                ': syntax error in forward annotation',
+            ]
+        ))
+
+        if error_log:
+            print()
+        for error in error_log:
+            print(error)
+
+        self.assertListEqual(error_log, [])
+
+    def test_style_guide(self):
+        import pycodestyle
+
+        class RespectFlake8NoQA(pycodestyle.StandardReport):
+            def error(self, lno, offset, text, check):
+                for line in self.lines[:5]:
+                    _, _, noqa = line.partition('flake8:')
+                    if noqa.lstrip().startswith('noqa'):
+                        return
+                line: str = self.lines[lno - 1]
+                _, _, comment = line.partition('#')
+                if comment.lower().strip().startswith('noqa'):
+                    return
+                super().error(lno, offset, text, check)
+
+        stylez = pycodestyle.StyleGuide(
+            ignore=[
+                'E128',  # A continuation line is under-indented for a visual indentation.
+                'E203',  # Colons should not have any space before them.
+                'E701',  # Multiple statements on one line (colon)
+                'E704',  # Multiple statements on one line (def)
+                'W503',  # Line break occurred before a binary operator
+                'F722',  # syntax error in forward annotation
+                'F821',  # undefined name
+                'E261',  # at least two spaces before inline comment
+            ],
+            max_line_length=140,
+            reporter=RespectFlake8NoQA,
         )
-        self.assertEqual(report.total_errors, 0,
-            msg='Flake8 formatting errors were found.')
+
+        root = os.path.abspath(inspect.stack()[0][1])
+        for _ in range(3):
+            root = os.path.dirname(root)
+
+        python_files = [path for path in glob(
+            os.path.join(root, 'refinery', '**', '*.py'), recursive=True)
+            if 'thirdparty' not in path]
+        report = stylez.check_files(python_files)
+        self.assertEqual(report.total_errors, 0, 'PEP8 formatting errors were found.')
 
     def test_no_legacy_interfaces(self):
         for unit in get_all_entry_points():
@@ -352,3 +405,25 @@ class TestScoping(TestUnitBase):
             test = next(data | unit)
             self.assertEqual(test.scope, scope)
             self.assertEqual(test['tv'], 7)
+
+    def test_pipeline(self):
+        data = self.download_sample('a322353cfc0360dbd8dcceb3e472a47848e50ca6578ef3834b152285b0030017')
+        pipe = self.load_pipeline(r'''
+            push [[
+                     | docmeta
+                     | jamv {path}
+                     | pop
+                ]| xtvba [
+                     | sep
+                ]| push [
+                     | rex CustomDocumentProperties.((??string)) {1:escvb}
+                     | pop keymap
+                ]| resplit '\b[A-Z0-9]{5,}\(((??ps1str))\)'
+                 | scope 1::2
+                 | escvb
+                 | rex '(.*?)IDWTOQ(.*)' {1:map[{2},v:v:keymap]:escvb!}
+            ]| xtp url
+        ''')
+        test = data | pipe | str
+        self.assertEqual(test,
+            'https'':/''/raw.githubusercontent''.com/rhonda113/solid-broccoli/refs/heads/main/solidbroccoli.txt')

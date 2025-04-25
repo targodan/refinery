@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 from typing import Sequence, Optional
 
-from refinery.units.crypto.cipher.tea import TEAUnit, TEABase, tea_block_operation, Arg
+from refinery.units.crypto.cipher.tea import StandardBlockCipherUnit, TEAUnit, TEABase, Arg
 from refinery.lib.crypto import BlockCipherFactory, CipherInterface, BufferType, CipherMode
 
 
@@ -18,8 +18,7 @@ class XXTEA(TEABase):
         self.block_size = block_size
         super().__init__(key, mode, big_endian)
 
-    @tea_block_operation
-    def block_encrypt(key: Sequence[int], v: Sequence[int]) -> Sequence[int]:
+    def tea_encrypt(self, key: Sequence[int], v: Sequence[int]) -> Sequence[int]:
         n = len(v)
         s = 0
         r = 6 + 52 // n
@@ -34,8 +33,7 @@ class XXTEA(TEABase):
                 z = v[p] = v[p] + x & 0xFFFFFFFF
         return v
 
-    @tea_block_operation
-    def block_decrypt(key: Sequence[int], v: Sequence[int]) -> Sequence[int]:
+    def tea_decrypt(self, key: Sequence[int], v: Sequence[int]) -> Sequence[int]:
         n = len(v)
         r = 6 + 52 // n
         s = r * 0x9E3779B9 & 0xFFFFFFFF
@@ -64,7 +62,7 @@ class xxtea(TEAUnit, cipher=BlockCipherFactory(XXTEA)):
         super().__init__(key, iv, padding, mode, raw, swap=swap, block_size=block_size)
 
     def _prepare_block(self, data: bytes):
-        if self.args.block_size < 2:
+        if self.args.block_size <= 1:
             blocks, remainder = divmod(len(data), 4)
             if remainder:
                 blocks += 1
@@ -81,4 +79,5 @@ class xxtea(TEAUnit, cipher=BlockCipherFactory(XXTEA)):
         return super().decrypt(data)
 
     def _new_cipher(self, **optionals) -> CipherInterface:
-        return super()._new_cipher(block_size=self.block_size, **optionals)
+        return StandardBlockCipherUnit._new_cipher(self,
+            big_endian=self.args.swap, block_size=self.block_size, **optionals)

@@ -1,0 +1,31 @@
+name: preview
+
+on:
+  workflow_call:
+    inputs:
+      python:
+        description: 'The Python version to test against.'
+        default: '3.13'
+        required: true
+        type: string
+
+jobs:
+  preview:
+    name: check forward compatibility
+    continue-on-error: true
+    runs-on: 'ubuntu-latest'
+    env:
+      MALSHARE_API: ${{ secrets.MALSHARE_API }}
+    steps:
+      - name: Checkout Main Repository
+        uses: actions/checkout@v4
+      - name: Install Dependencies
+        uses: ./.github/actions/setup/
+        with:
+          py: ${{ inputs.python }}
+          os: 'ubuntu-latest'
+      - name: Run Tests
+        uses: ./.github/actions/test/
+        with:
+          py: ${{ inputs.python }}
+          os: 'ubuntu-latest'

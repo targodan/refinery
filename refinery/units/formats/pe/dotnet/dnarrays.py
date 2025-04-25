@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import collections
-import functools
 import re
 import itertools
 import json
 
 from refinery.units import Unit
+from refinery.units.formats.pe.dotnet import CodePath
 from refinery.lib.dotnet.header import DotNetHeader, NetMetaDataTables
 from refinery.lib.structures import StructReader
 from refinery.lib.types import ByteStr
@@ -112,21 +112,22 @@ class dnarrays(Unit):
                 assert reader.read_byte() == 0x58
 
     def process(self, data):
-        @functools.lru_cache(maxsize=None)
-        def method(offset: int):
-            rva = header.pe.get_rva_from_offset(offset)
-            method = min(tables.MethodDef, key=lambda m: (m.RVA > rva, rva - m.RVA))
-            return method.Name
-
         header = DotNetHeader(data)
         tables = header.meta.Streams.Tables
+        cp = CodePath(header)
+
         arrays = dict(itertools.chain(
             self._int_arrays(data, header, tables),
             self._str_arrays(data, header, tables),
         ))
         result = collections.defaultdict(list)
         for offset in sorted(arrays):
-            result[method(offset)].append(arrays[offset])
+            result[cp.method_spec(offset)].append(arrays[offset])
 
         result = {m: {F'v{k}': v for k, v in enumerate(t, 1)} for m, t in result.items()}
         return json.dumps(result, indent=4).encode(self.codec)
+
+    @classmethod
+    def handles(cls, data):
+        from refinery.lib.id import is_likely_pe_dotnet
+        return is_likely_pe_dotnet(data)

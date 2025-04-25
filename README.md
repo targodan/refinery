@@ -32,6 +32,12 @@ Run units with `-h` to learn how they work, grep through the [docs][] or use the
 Watch [the latest video][VOD3] if you want to see it in action.
 But also, read the rest of this readme.
 
+## Release Schedule
+
+There is no release schedule, but releases happen very frequently and it is recommended to update periodically.
+Bugfixes are not documented outside of GIT, but all other changes (i.e. new features) are documented in the [changelog](CHANGELOG.md).
+Follow me on [Mastodon][] for updates about particularly impactful releases.
+
 
 ## Documentation
 
@@ -60,7 +66,7 @@ On top of that, I collect additional resources (including some produced by third
 ## License
 
 The Binary Refinery is (c) 2019 Jesko Hüttenhain, and published under a [3-Clause BSD License][license].
-This repository also contains [a copy of the full license text](LICENSE). 
+This repository also contains [a copy of the full license text](LICENSE.md). 
 If you want to do something with it that's not covered by this license, please feel free to contact the author.
 
 ## Warnings & Advice
@@ -334,6 +340,7 @@ emit "Once upon a time, at the foot of a great mountain ..." ^
 [JB]: https://bin.re/
 [MH]: https://www.youtube.com/@MalwareAnalysisForHedgehogs
 [CY]: https://www.youtube.com/@jstrosch
+[Mastodon]: https://infosec.exchange/@rattle
 
 [BLOG]: https://bin.re/blog/analysing-ta551-malspam-with-binary-refinery/
 [VOD1]: https://www.youtube.com/watch?v=4gTaGfFyMK4

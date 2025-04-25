@@ -20,8 +20,9 @@ from refinery.lib.types import NoMask, INF
 
 if TYPE_CHECKING:
     from numpy import ndarray
-    from typing import TypeVar, Iterable, Generator, Optional
+    from typing import TypeVar, Union, Iterable, Generator, Optional, Tuple
     _T = TypeVar('_T')
+    _I = Union[Iterable[int], int]
 
 
 class FastBlockError(Exception):
@@ -33,10 +34,12 @@ class BlockTransformationBase(Unit, abstract=True):
     def __init__(
         self,
         bigendian: Arg.Switch('-E', help='Read chunks in big endian.') = False,
-        blocksize: Arg.Number('-B', help='The size of each block in bytes, default is 1.') = None,
+        blocksize: Arg.Number('-B', help=(
+            'The size of each block in bytes, default is 1.'
+        )) = None,
         precision: Arg.Number('-P', help=(
-            'The size of the variables used for computing the result. By default, this is equal to the block size. The value may be '
-            'zero, indicating that arbitrary precision is required.')) = None,
+            'The size of the variables used for computing the result. By default, this is equal to the block size. '
+            'The value may be zero, indicating that arbitrary precision is required.')) = None,
         _truncate: Arg.Delete() = 0,
         **keywords
     ):
@@ -171,12 +174,10 @@ class ArithmeticUnit(BlockTransformation, abstract=True):
     ):
         super().__init__(bigendian=bigendian, blocksize=blocksize, precision=precision, argument=argument, **kw)
 
-    def _argument_parse_hook(self, it):
-        if hasattr(it, '__len__') and len(it) == 1:
-            it = it[0]
+    def _argument_parse_hook(self, it: _I) -> Tuple[bool, _I]:
         return it, False
 
-    def _normalize_argument(self, it, masked=False):
+    def _infinitize_argument(self, it: _I, masked=False) -> Iterable[int]:
         def _mask(it):
             warnings = 3
             for block in it:
@@ -187,6 +188,8 @@ class ArithmeticUnit(BlockTransformation, abstract=True):
                     if not warnings:
                         self.log_warn('additional warnings are suppressed')
                 yield out
+        if isinstance(it, int):
+            it = (it,)
         if not masked:
             it = _mask(it)
         return infinitize(it)
@@ -216,44 +219,45 @@ class ArithmeticUnit(BlockTransformation, abstract=True):
         except ImportError as IE:
             raise FastBlockError from IE
 
-        order = self._byte_order_symbol
-        args = [self._argument_parse_hook(a) for a in self.args.argument]
-        blocks = len(data) // self.blocksize
+        byte_order = self._byte_order_symbol
+        num_blocks = len(data) // self.blocksize
 
         try:
             if self.precision is None:
                 dtype = numpy.dtype('O')
             else:
-                dtype = numpy.dtype(F'{order}u{self.precision!s}')
+                dtype = numpy.dtype(F'{byte_order}u{self.precision!s}')
         except TypeError as T:
             raise FastBlockError from T
 
-        npargs = []
+        br_args = []
+        np_args = []
 
-        for k, (it, masked) in enumerate(args):
-            na = self._normalize_argument(it, masked)
-            args[k] = na
+        for a in self.args.argument:
+            it, masked = self._argument_parse_hook(a)
+            na = self._infinitize_argument(it, masked)
+            br_args.append(na)
             if isinstance(it, int):
                 if not masked:
                     it &= self.fmask
                 npa = int(it)
             elif self.precision is INF:
-                npa = numpy.array(list(itertools.islice(na, blocks)), dtype=dtype)
+                npa = numpy.array(list(itertools.islice(na, num_blocks)), dtype=dtype)
             else:
-                npa = numpy.fromiter(na, dtype, blocks)
-            npargs.append(npa)
+                npa = numpy.fromiter(na, dtype, num_blocks)
+            np_args.append(npa)
 
-        overlap = len(data) - blocks * self.blocksize
+        overlap = len(data) - num_blocks * self.blocksize
 
         try:
-            stype = numpy.dtype(F'{order}u{self.blocksize}')
+            stype = numpy.dtype(F'{byte_order}u{self.blocksize}')
         except TypeError as T:
             raise FastBlockError from T
 
-        src = numpy.frombuffer(memoryview(data), stype, blocks)
+        src = numpy.frombuffer(memoryview(data), stype, num_blocks)
         if stype != dtype:
             src = src.astype(dtype)
-        tmp = self.inplace(src, *npargs)
+        tmp = self.inplace(src, *np_args)
         if tmp is not None:
             src = tmp
         if stype != dtype:
@@ -262,9 +266,9 @@ class ArithmeticUnit(BlockTransformation, abstract=True):
         if overlap and self._truncate < 2:
             rest = self.rest(data)
             if self._truncate < 1:
-                last_ops = [next(a) for a in args]
+                last_ops = [next(a) for a in br_args]
                 last_int = int.from_bytes(rest, self._byte_order_adjective)
-                dst_tail = self.operate(last_int, *last_ops)
+                dst_tail = self.operate(last_int, *last_ops) & self.fmask
                 dst_tail = dst_tail.to_bytes(self.blocksize, self._byte_order_adjective)
                 rest = dst_tail[:overlap]
             dst.extend(rest)
@@ -282,7 +286,7 @@ class ArithmeticUnit(BlockTransformation, abstract=True):
             self.log_debug('fast block method successful')
             return result
         arguments = [
-            self._normalize_argument(*self._argument_parse_hook(a))
+            self._infinitize_argument(*self._argument_parse_hook(a))
             for a in self.args.argument]
         try:
             mask = self.fmask
@@ -316,20 +320,34 @@ class UnaryOperation(ArithmeticUnit, abstract=True):
 
 
 class BinaryOperation(ArithmeticUnit, abstract=True):
-    def __init__(self, argument: Arg.Delete(), bigendian=False, blocksize=None):
-        super().__init__(argument,
-            bigendian=bigendian, blocksize=blocksize)
+    def __init__(self, argument, bigendian=False, blocksize=None):
+        super().__init__(argument, bigendian=bigendian, blocksize=blocksize)
 
     def inplace(self, block, argument) -> None:
         super().inplace(block, argument)
 
 
 class BinaryOperationWithAutoBlockAdjustment(BinaryOperation, abstract=True):
+    def __init__(
+        self, argument, bigendian=False,
+        blocksize: Arg.Number(help=(
+            'The size of each block in bytes. It is chosen, by default, to be the smallest size that can '
+            'hold the provided argument without loss of precision. For example, passing the value 0x1234 '
+            'will result in a default block size of 2, while passing the value 12 will mean that the '
+            'default block size is 1.'
+        )) = None
+    ):
+        super().__init__(argument, bigendian=bigendian, blocksize=blocksize)
 
-    def _argument_parse_hook(self, it):
-        it, masked = super()._argument_parse_hook(it)
-        if isinstance(it, int):
-            masked = True
+    def _argument_parse_hook(self, it: _I) -> Tuple[bool, _I]:
+        try:
+            n = len(it)
+        except TypeError:
+            pass
+        else:
+            if n == 1:
+                it = it[0]
+        if masked := isinstance(it, int):
             if self.args.blocksize is None:
                 self.log_debug('detected numeric argument with no specified block size')
                 bits = it.bit_length()

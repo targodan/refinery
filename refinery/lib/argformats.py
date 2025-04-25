@@ -119,6 +119,7 @@ from refinery.lib.frame import Chunk
 from refinery.lib.tools import isbuffer, infinitize, one, normalize_to_identifier, exception_to_string
 from refinery.lib.types import NoMask, RepeatedInteger
 from refinery.lib.meta import is_valid_variable_name, metavars, Percentage
+from refinery.lib.patterns import formats
 
 if TYPE_CHECKING:
     from refinery import Unit
@@ -326,7 +327,7 @@ def sliceobj(expression: Union[int, str, slice], data: Optional[Chunk] = None, r
     if not sliced or len(sliced) > 3:
         raise ArgumentTypeError(F'The expression "{expression}" is not a valid slice.')
     try:
-        sliced = [None if not t else PythonExpression.Evaluate(t, variables) for t in sliced]
+        sliced = [None if not t else LazyPythonExpression(t, variables) for t in sliced]
     except ParserVariableMissing:
         if final:
             raise
@@ -505,7 +506,7 @@ class DelayedArgumentDispatch:
         return _register
 
 
-def LazyPythonExpression(expression: str) -> MaybeDelayedType[Any]:
+def LazyPythonExpression(expression: str, variables: Optional[dict] = None) -> MaybeDelayedType[Any]:
     """
     Wraps the given expression for use as a `refinery.lib.argformats.multibin` expression. If it
     contains no variables, the expression is evaluated immediately, otherwise the function returns
@@ -514,10 +515,20 @@ def LazyPythonExpression(expression: str) -> MaybeDelayedType[Any]:
     expression = expression.strip()
     if match := re.fullmatch(R'([1-9][0-9]?)%', expression):
         return Percentage(int(match[1]) / 100)
-    if match := re.fullmatch(R'(?i)(?P<digits>[1-9][0-9]*|0)(?P<unit>[KMGTPE]B?)', expression):
+    if match := re.fullmatch(RF'''(?ix)
+        (?: (?P<flt>{formats.float!s})
+          | (?P<int>{formats.integer!s})
+        ) (?P<unit>[KMGTPE]B?)
+    ''', expression):
         unit = match['unit'].upper()
-        k = 'KMGTPE'.index(unit[0])
-        return int(match['digits']) * (1000 ** k)
+        step = 'KMGTPE'.index(unit[0]) + 1
+        if n := match['flt']:
+            base = float(n)
+        if n := match['int']:
+            base = int(n, 0)
+        return int(base * (1000 ** step))
+    if variables is not None:
+        return PythonExpression.Evaluate(expression, variables)
     if (parser := PythonExpression.Lazy(expression)).variables:
         def evaluate(data: Chunk):
             try:
@@ -970,35 +981,44 @@ class DelayedArgument(LazyEvaluation):
             return obj
         raise ArgumentTypeError(F'The meta variable {name} is of type {type(obj).__name__} and no conversion is known.')
 
+    def _var(self, name: str, eat: bool) -> bytes:
+        if not name.isidentifier():
+            name = multibin(name)
+
+        def extract(data: Chunk):
+            var = name(data) if callable(name) else name
+            if not isinstance(var, str):
+                if not isinstance(var, bytes):
+                    var = bytes(var)
+                var = var.decode()
+            meta = metavars(data)
+            try:
+                if eat:
+                    result = meta.pop(var)
+                else:
+                    result = meta[var]
+            except KeyError as KE:
+                raise VariableMissing(var) from KE
+            return self._interpret_variable(name, result)
+
+        return extract
+
     @handler.register('v', 'var', final=True)
     def var(self, name: str) -> bytes:
         """
-        The final handler `var:name` contains the value of the meta variable `name`.
-        The variable remains attached to the chunk.
+        The handler `var:name` contains the value of the meta variable `name`. This handler is semi-final;
+        if the provided argument is an identifier, it is read directly as a variable name. If it is not an
+        identifier, it will be interpreted as a multibin expression to compute the name.
         """
-        def extract(data: Chunk):
-            meta = metavars(data)
-            try:
-                result = meta[name]
-            except KeyError:
-                raise VariableMissing(name)
-            return self._interpret_variable(name, result)
-        return extract
+        return self._var(name, eat=False)
 
     @handler.register('eat', final=True)
     def eat(self, name: str) -> bytes:
         """
-        The final handler `eat:name` contains the value of the meta variable `name`.
-        The variable is removed from the chunk and no longer available to subsequent
-        units.
+        The handler `eat:name` works exactly like `var:name` with the exception that the variable is removed
+        from the chunk after evaluation.
         """
-        def extract(data: Chunk):
-            try:
-                result = data.meta.pop(name)
-            except KeyError as K:
-                raise VariableMissing(name) from K
-            return self._interpret_variable(name, result)
-        return extract
+        return self._var(name, eat=True)
 
     @handler.register('e', 'E', 'eval')
     def eval(self, expression) -> Any:
@@ -1441,27 +1461,33 @@ class DelayedRegexpArgument(DelayedArgument):
     @DelayedArgumentDispatch.Inherit(DelayedArgument)
     def handler(self, expression: str) -> bytes:
         """
-        The default handler encodes the input expression as latin-1 to return a binary
-        string regular expression.
-        Furthermore, the use of named patterns from `refinery.lib.patterns.formats` and
-        `refinery.lib.patterns.indicators` is possible by means of the extension format
-        `(??name)`. For example, the pattern `e:((??url)\\x00){4}` will match a sequence
-        of four URL strings which are all terminated with a null character.
+        The default handler encodes the input expression as latin-1 to return a binary string regular
+        expression. Two additional syntax features have been added:
+
+        - The use of named patterns from `refinery.lib.patterns.formats` and `refinery.lib.patterns.indicators`
+          is possible by means of the extension format `(??name)`. For example, the pattern `((??url)\\x00){4}`
+          will match a sequence of four URL strings which are all terminated with a null character.
+        - The syntax `(?/var=PATTERN)` is equivalent to `(?P<var>PATTERN)`.
         """
-        if '(??' in expression:
+        if '(?' in expression:
             from refinery.lib.patterns import formats, indicators
 
-            def replace(match):
+            def replace_known_pattern(match):
                 name = match[1]
                 return '(?:{})'.format(formats.get(
                     name, indicators.get(name, match[0])))
 
+            def replace_variable_assignment(match):
+                return F'(?P<{match[1]}>'
+
+            expression = re.sub(R'\(\?/(\w+)=',
+                replace_variable_assignment, expression)
             expression = re.sub(
                 R'\(\?\?({}|{})\)'.format(
                     '|'.join(p.name for p in formats),
                     '|'.join(p.name for p in indicators)
                 ),
-                replace,
+                replace_known_pattern,
                 expression
             )
 

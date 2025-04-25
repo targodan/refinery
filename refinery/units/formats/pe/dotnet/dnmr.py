@@ -43,3 +43,7 @@ class dnmr(PathExtractorUnit):
                 elif isbuffer(entry.Value):
                     data = entry.Value
             yield UnpackResult(entry.Name, data)
+
+    @classmethod
+    def handles(cls, data):
+        return data[:4] == b'\xCE\xCA\xEF\xBE'

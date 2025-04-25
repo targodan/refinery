@@ -44,7 +44,6 @@ FileTypeMap = {
     'application/msdos-windows': 'exe',
     'application/mspowerpoint': 'ppt',
     'application/msword': 'doc',
-    'application/octet-stream': 'bin',
     'application/ogg': 'ogg',
     'application/pdf': 'pdf',
     'application/plain': 'text',
@@ -180,6 +179,7 @@ FileTypeMap = {
     'image/x-quicktime': 'qtif',
     'image/x-tiff': 'tif',
     'image/x-windows-bmp': 'bmp',
+    'image/x-ms-bmp': 'bmp',
     'image/x-xpixmap': 'pm',
     'model/vrml': 'vrml',
     'multipart/x-gzip': 'gz',
@@ -255,6 +255,10 @@ class FileMagicInfo:
     _GZIP_PEEK_MINIMUM = 64
     _GZIP_DC_CHUNK_LEN = 16
 
+    @property
+    def blob(self):
+        return self.description.lower() == 'data'
+
     def __init__(self, data, default='bin', decompress=True):
         if not magic:
             raise NoMagicAvailable
@@ -262,7 +266,8 @@ class FileMagicInfo:
             data = bytes(data)
         mime = magicparse(data, mime=True)
         self.mime = mime.split(';')[0].lower()
-        self.description = magicparse(data)
+        description = magicparse(data).strip()
+        self.description = description
         try:
             extension = FileTypeMap[self.mime]
         except KeyError:

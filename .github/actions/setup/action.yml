@@ -1,0 +1,30 @@
+name: "Python Setup"
+description: "Python Setup and Dependencies"
+inputs:
+  py:
+    required: true
+    description: "Target Python Version"
+  os:
+    required: true
+    description: "Target Operating System"
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python ${{ inputs.py }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.py }}
+    - name: Install Dependencies (Linux)
+      if: ${{ contains(inputs.os, 'ubuntu') }}
+      shell: ${{ contains(inputs.os, 'windows') && 'cmd' || 'bash' }}
+      run: sudo apt-get install xclip xvfb
+    - name: Install Dependencies (MacOS)
+      if: ${{ contains(inputs.os, 'macos') }}
+      shell: bash
+      run: brew install libmagic
+    - name: Install Dependencies
+      shell: ${{ contains(inputs.os, 'windows') && 'cmd' || 'bash' }}
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install pycodestyle pyflakes
+        pip install .[all]

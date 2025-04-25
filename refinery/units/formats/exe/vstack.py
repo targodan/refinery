@@ -20,6 +20,7 @@ from refinery.lib.types import bounds, INF
 from refinery.lib.meta import metavars
 from refinery.lib.tools import isbuffer, exception_to_string, NoLogging
 from refinery.lib.emulator import Emulator, SpeakeasyEmulator, UnicornEmulator, IcicleEmulator, Hook, EmulationError
+from refinery.lib.intervals import MemoryIntervalUnion
 from refinery.lib.argformats import PythonExpression, ParserVariableMissing
 from refinery.lib.structures import StructReader
 
@@ -27,8 +28,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 if TYPE_CHECKING:
-    from typing import Optional, Iterator, TypeVar
-    from intervaltree import IntervalTree, Interval
+    from typing import Optional, TypeVar
     FN = TypeVar('FN')
 
 
@@ -71,7 +71,6 @@ class EmuConfig:
 @dataclass
 class EmuState:
     cfg: EmuConfig
-    writes: IntervalTree
     expected_address: int
     address_width: int
     waiting: int = 0
@@ -81,9 +80,10 @@ class EmuState:
     previous_address: int = 0
     callstack_ceiling: int = 0
     invalid_instructions: int = 0
-    synthesized: set[bytes] = field(default_factory=set)
+    synthesized: dict[bytes, str] = field(default_factory=dict)
     ticks: int = field(default_factory=lambda: INF)
     visits: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    memory: MemoryIntervalUnion = field(default_factory=MemoryIntervalUnion)
     init_registers: List[int] = field(default_factory=list)
     last_read: Optional[int] = None
     last_api: Optional[int] = None
@@ -92,6 +92,12 @@ class EmuState:
         _width = len(str(self.cfg.wait))
         _depth = len(self.callstack)
         return F'[wait={self.waiting:0{_width}d}] [depth={_depth}] {self.fmt(self.previous_address)}: {msg}'
+
+    def contains(self, address: int):
+        return self.memory.overlaps(address)
+
+    def write(self, address: int, data: bytes):
+        self.memory.addi(address, data)
 
     def fmt(self, address: int) -> str:
         return F'0x{address:0{self.address_width}X}'
@@ -143,10 +149,10 @@ class VStackEmulatorMixin(Emulator[Any, Any, EmuState]):
                 sockaddr.bigendian = True
                 port = sockaddr.u16()
                 host = '.'.join(map(str, sockaddr.read(4)))
-                self.state.synthesized.add(F'{host}:{port}'.encode(vstack.codec))
+                self.state.synthesized[F'{host}:{port}'.encode(vstack.codec)] = F'{module}::{symbol}'
                 logged_args[1] = F'sockaddr_in{{AF_INET, {host!r}, {port}}}'
         logged_args = [F'{FG.LIGHTCYAN_EX}{x}{RS}' for x in logged_args]
-        vstack.log_debug(F'{FG.LIGHTCYAN_EX}{module}{RS}::{FG.LIGHTYELLOW_EX}{symbol}{RS}({", ".join(logged_args)}){RS}')
+        vstack.log_info(F'{FG.LIGHTCYAN_EX}{module}{RS}::{FG.LIGHTYELLOW_EX}{symbol}{RS}({", ".join(logged_args)}){RS}')
         try:
             retval = function(args)
         except Exception as e:
@@ -207,8 +213,8 @@ class VStackEmulatorMixin(Emulator[Any, Any, EmuState]):
         if (
             not skipped
             and unsigned_value == 0
-            and state.writes.at(address) is not None
             and state.cfg.log_zero_overwrites is False
+            and state.contains(address)
         ):
             try:
                 if any(self.mem_read(address, size)):
@@ -217,7 +223,7 @@ class VStackEmulatorMixin(Emulator[Any, Any, EmuState]):
                 pass
 
         if not skipped:
-            state.writes.addi(address, address + size + 1)
+            state.write(address, unsigned_value.to_bytes(size, 'little'))
             state.waiting = 0
 
         def info():
@@ -330,24 +336,20 @@ class vstack(Unit):
     However, if you want to initialize certain registers differently, you can set an environment
     variable to the desired value.
     """
-
-    @Unit.Requires('intervaltree', 'default', 'extended')
-    def _intervaltree():
-        import intervaltree
-        return intervaltree
-
     @Unit.Requires('capstone', 'default', 'extended')
     def _capstone():
         import capstone
         return capstone
 
-    @Unit.Requires('unicorn', 'default', 'extended')
+    @Unit.Requires('unicorn==2.0.1.post1', 'default', 'extended')
     def _unicorn():
+        import importlib
+        importlib.import_module('setuptools')
         with NoLogging():
             import unicorn
             return unicorn
 
-    @Unit.Requires('speakeasy-emulator', 'extended')
+    @Unit.Requires('speakeasy-emulator-refined', 'extended')
     def _speakeasy():
         import speakeasy
         return speakeasy
@@ -510,9 +512,8 @@ class vstack(Unit):
                     addresses.append(symbol.address)
                     break
 
-        for address in addresses:
-            tree = self._intervaltree.IntervalTree()
-            state = EmuState(cfg, tree, address, emu.exe.pointer_size // 4, stop=args.stop)
+        for cursor in addresses:
+            state = EmuState(cfg, cursor, emu.exe.pointer_size // 4, stop=args.stop)
             emu.reset(state)
 
             for reg in emu.general_purpose_registers():
@@ -527,9 +528,9 @@ class vstack(Unit):
                 if isinstance(value, str):
                     value = value.encode()
                 if isbuffer(value):
-                    base = emu.malloc(len(value))
-                    emu.mem_write(base, bytes(value))
-                    emu.set_register(reg, base)
+                    start = emu.malloc(len(value))
+                    emu.mem_write(start, bytes(value))
+                    emu.set_register(reg, start)
                     self.log_info(F'setting {var} to mapped buffer of size 0x{len(value):X}')
                     continue
                 _tn = value.__class__.__name__
@@ -545,25 +546,18 @@ class vstack(Unit):
                 state.ticks = timeout
 
             try:
-                emu.emulate(address, args.stop)
+                emu.emulate(cursor, args.stop)
             except EmulationError:
                 pass
 
-            yield from state.synthesized
+            for patch, api in state.synthesized.items():
+                chunk = self.labelled(patch, src=api)
+                yield chunk
 
-            tree.merge_overlaps()
-            it: Iterator[Interval] = iter(tree)
-            for interval in it:
-                size = interval.end - interval.begin - 1
-                if size not in bounds[args.patch_range]:
+            valid = bounds[args.patch_range]
+            for base, patch in state.memory:
+                if len(patch) not in valid or not any(patch):
                     continue
-                try:
-                    patch = emu.mem_read(interval.begin, size)
-                except Exception as error:
-                    width = emu.exe.pointer_size // 4
-                    self.log_info(F'error reading 0x{interval.begin:0{width}X}:{size}: {error!s}')
-                    continue
-                if not any(patch):
-                    continue
-                self.log_info(F'memory patch at {state.fmt(interval.begin)} of size {size}')
-                yield patch
+                self.log_info(F'memory patch at {state.fmt(base)} of size {len(patch)}')
+                chunk = self.labelled(patch, src=base)
+                yield chunk

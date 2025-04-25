@@ -158,7 +158,7 @@ _pattern_defanged_domain = _format_defanged_domain.format(repeat='{0,20}', tlds=
 _pattern_subdomain = _format_serrated_domain.format(repeat='{1,20}', tlds=_TLDS)
 
 _pattern_octet = R'(?:1\d\d|2[0-4]\d|25[0-5]|[1-9]?\d)'
-_pattern_serrated_ipv4 = R'(?<!\.|\d)(?:{o}\.){{3}}{o}(?![\d\.])'.format(o=_pattern_octet)
+_pattern_serrated_ipv4 = R'(?<![0-9])(?:{o}\.){{3}}{o}(?![0-9])'.format(o=_pattern_octet)
 _pattern_defanged_ipv4 = R'(?:{o}{d}){{3}}{o}'.format(o=_pattern_octet, d=R'(?:\[\.\]|\.)')
 
 # Taken from: https://stackoverflow.com/a/17871737/9130824
@@ -197,6 +197,48 @@ _pattern_number = (
     '[-+]?(?:0[bB][01]+|0[xX][0-9a-fA-F]+|0[1-7][0-7]*|(?:[1-9][0-9]*|0)(?P<fp1>\\.[0-9]*)?|(?P<fp2>\\.[0-9]+))'
     '(?(fp1)(?:[eE][-+]?[0-9]+)?|(?(fp2)(?:[eE][-+]?[0-9]+)?|(?=[uU]?[iI]\\d{1,2}|[LlHh]|[^a-zA-Z0-9]|$)))'
 )
+
+
+_pattern_date_elements = {
+    'B': '(?:{})'.format('|'.join([
+        '[jJ]an(?:uary)?',
+        '[fF]eb(?:ruary)?',
+        '[mM]ar(?:ch)?',
+        '[aA]pr(?:il)?',
+        '[mM]ay',
+        '[jJ]un(?:e)?',
+        '[jJ]ul(?:y)?',
+        '[aA]ug(?:ust)?',
+        '[sS]ep(?:tember)?',
+        '[oO]ct(?:ober)?',
+        '[nN]ov(?:ember)?',
+        '[dD]ec(?:ember)?',
+    ])),
+    'D': '(?:[23]?(?:1st|2nd|3rd|[4-9]th)|20th|30th)',
+    'd': '(?:0?[1-9]|[12][0-9]|3[01])',
+    'm': '(?:0[1-9]|1[012])',
+    'I': '(?:0[1-9]|1[0-2])',
+    'p': '(?:[ap]m|[AP]M)',
+    'H': '(?:[01][0-9]|2[0-3])',
+    'M': '(?:[0-5][0-9])',
+    'S': '(?:[0-5][0-9])',
+    'z': '(?:[-+](?:[0-9]{2}){1,3}(?:\\.[0-9]{6})?)',
+    'y': '(?:[0-9]{2})',
+    'Y': '(?:[0-9]{4})',
+    'c': '(?:[,;]|\\s|[,;]\\s)',
+}
+
+_pattern_time = r'(?:{H}:{M}(?::{S})?|{I}:{M}(?::{S})?{c}?\(?{p}\)?)'.format_map(_pattern_date_elements)
+_pattern_date_elements['T'] = _pattern_time
+
+_pattern_date_list = [
+    R'{B}\s(?:{d}|{D}){c}{Y}(?:\s{T})?',
+    R'{Y}[-:]{m}[-:]{d}(?:[T\x20]{H}:{M}(?::{S})?(?:[Z.][0-9]{{6}}){z}?)',
+    R'{m}/{d}/{Y}(?:{c}{T})?',
+]
+
+_pattern_date = '|'.join(
+    _p.format_map(_pattern_date_elements) for _p in _pattern_date_list)
 
 _pattern_cmdstr = R'''(?:"(?:""|[^"])*"|'(?:''|[^'])*')'''
 _pattern_ps1str = R'''(?:(?:@"\s*?[\r\n].*?[\r\n]"@)|(?:@'\s*?[\r\n].*?[\r\n]'@)|(?:"(?:`.|""|[^"\n])*")|(?:'(?:''|[^'\n])*'))'''
@@ -329,10 +371,16 @@ class formats(PatternEnum):
     "Sequences of alpha-numeric characters"
     b32 = pattern('[A-Z2-7]+|[a-z2-7+]')
     "Base32 encoded strings"
+    b58 = alphabet(R'(?:[1-9A-HJ-NP-Za-km-z]')
+    "Base58 encoded strings"
+    b62 = alphabet(R'(?:[0-9A-Za-z]')
+    "Base62 encoded strings"
     b64 = alphabet(R'(?:[0-9a-zA-Z\+/]{4})', postfix=R'(?:(?:[0-9a-zA-Z\+/]{2,3})={0,3})?')
     "Base64 encoded strings"
     b85 = alphabet(R'[-!+*()#-&^-~0-9;-Z]')
     "Base85 encoded strings"
+    a85 = alphabet(R'[!-u]')
+    "Ascii85 encoded strings"
     b92 = pattern(_pattern_b92)
     "Base92 encoded strings"
     b64any = alphabet(R'(?:[-\w\+/]{4})', postfix=R'(?:(?:[-\w\+/]{2,3})={0,3})?')
@@ -349,6 +397,9 @@ class formats(PatternEnum):
     "Base64 encoded strings, separated by whitespace"
     spaced_b85 = alphabet(R'[-!+*()#-&^-~0-9;-Z\s]')
     "Base85 encoded string, separated by whitespace"
+    spaced_a85 = alphabet(R'[!-u\s]')
+    "Ascii85 encoded string, separated by whitespace"
+
     utf8 = pattern(_pattern_utf8)
     "A sequence of bytes that can be decoded as UTF8."
     hexdump = tokenize(_pattern_hexline, bound='', sep=R'\s*\n')
@@ -405,6 +456,8 @@ class indicators(PatternEnum):
     "Email addresses"
     guid = pattern(_pattern_guid)
     "Windows GUID strings"
+    date = pattern(_pattern_date)
+    "A date or timestamp value in a common format"
     ipv4 = pattern(_pattern_serrated_ipv4)
     "String representations of IPv4 addresses"
     ipv6 = pattern(_pattern_ipv6)

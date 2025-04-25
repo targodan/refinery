@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Union, Iterable, List, TYPE_CHECKING
 from fnmatch import fnmatch
 
 import re
@@ -18,7 +18,11 @@ from refinery.lib.structures import MemoryFile
 from refinery.lib.tools import NoLogging
 
 if TYPE_CHECKING:
-    from pyxlsb2.records import SheetRecord
+    from pyxlsb2.records import SheetRecord as XlsbSheet
+    from pyxlsb2 import Workbook as XlsbWorkbook
+    from xlrd2 import Book as XlrdWorkbook
+    from openpyxl import Workbook as PyxlWorkbook
+    from openpyxl.worksheet.worksheet import Worksheet as PyxlSheet
 
 
 defusedxml.defuse_stdlib()
@@ -60,7 +64,7 @@ class SheetReference:
                     sheet = sheet[1:~1]
         return sheet, token
 
-    def _parse_range(self, token):
+    def _parse_range(self, token: str):
         try:
             start, end = token.split(':')
             return start, end
@@ -68,7 +72,7 @@ class SheetReference:
             return token, token
 
     @staticmethod
-    def _parse_token(token):
+    def _parse_token(token: str):
         try:
             row, col = _ref2rc(token)
         except ValueError:
@@ -136,6 +140,8 @@ class SheetReference:
 
 class Workbook:
 
+    workbook: Union[XlsbWorkbook, XlrdWorkbook, PyxlWorkbook]
+
     class _xlmode(enum.IntEnum):
         openpyxl = 1
         xlrd = 2
@@ -149,15 +155,10 @@ class Workbook:
             return unit._pyxlsb2.open_workbook(MemoryFile(data))
 
         def xlrd():
-            with io.StringIO() as logfile:
-                vb = max(unit.log_level.verbosity - 1, 0)
-                wb = unit._xlrd.open_workbook(file_contents=data, logfile=logfile, verbosity=vb, on_demand=True)
-                logfile.seek(0)
-                for entry in logfile:
-                    entry = entry.strip()
-                    if re.search(R'^[A-Z]+:', entry) or '***' in entry:
-                        unit.log_info(entry)
-                return wb
+            verbose = max(unit.log_level.verbosity - 1, 0)
+            log = unit._get_logger_io()
+            return unit._xlrd.open_workbook(
+                file_contents=data, logfile=log, verbosity=verbose, on_demand=True)
 
         exception = None
 
@@ -180,15 +181,17 @@ class Workbook:
 
     def sheets(self):
         if self.mode is self._xlmode.openpyxl:
-            yield from self.workbook.sheetnames
+            pyxl: PyxlWorkbook = self.workbook
+            yield from pyxl.sheetnames
             return
         if self.mode is self._xlmode.xlrd:
-            yield from self.workbook.sheet_names()
+            xlrd: XlrdWorkbook = self.workbook
+            yield from xlrd.sheet_names()
             return
-        assert self.mode is self._xlmode.pyxlsb2
-        for rec in self.workbook.sheets:
-            rec: SheetRecord
-            yield rec.name
+        if self.mode is self._xlmode.pyxlsb2:
+            xlsb: XlsbWorkbook = self.workbook
+            it: Iterable[XlsbSheet] = xlsb.sheets
+            yield from (rec.name for rec in it)
 
     def get_sheet_data(self, name: str):
         def _sanitize(value):
@@ -209,27 +212,30 @@ class Workbook:
                 return value.isoformat(' ', 'seconds')
             return str(value)
 
-        def _padded(data):
+        def _padded(data: List[List[str]]):
             ncols = max((len(row) for row in data), default=0)
             for row in data:
                 row.extend([None] * (ncols - len(row)))
             return data
 
         if self.mode is self._xlmode.openpyxl:
-            sheet = self.workbook[name]
+            pyxl_wbook: PyxlWorkbook = self.workbook
+            pyxl_sheet: PyxlSheet = pyxl_wbook[name]
             with NoLogging():
-                data = _padded(_sanitize(sheet.iter_rows(values_only=True)))
+                data = _padded(_sanitize(pyxl_sheet.iter_rows(values_only=True)))
         elif self.mode is self._xlmode.pyxlsb2:
-            sheet = self.workbook.get_sheet_by_name(name)
-            data = _padded(_sanitize(sheet.rows()))
+            xlsb_wbook: XlsbWorkbook = self.workbook
+            xlsb_sheet = xlsb_wbook.get_sheet_by_name(name)
+            data = _padded(_sanitize(xlsb_sheet.rows()))
         elif self.mode is self._xlmode.xlrd:
-            sheet = self.workbook.sheet_by_name(name)
+            xlrd_wbook: XlrdWorkbook = self.workbook
+            xlrd_sheet = xlrd_wbook.sheet_by_name(name)
             data = []
-            for r in range(sheet.nrows):
+            for r in range(xlrd_sheet.nrows):
                 row = []
-                for c in range(sheet.ncols):
+                for c in range(xlrd_sheet.ncols):
                     try:
-                        row.append(_sanitize(sheet.cell_value(r, c)))
+                        row.append(_sanitize(xlrd_sheet.cell_value(r, c)))
                     except IndexError:
                         row.append(None)
                 data.append(row)
@@ -256,6 +262,19 @@ class _ExcelUnit(Unit, abstract=True):
         import pyxlsb2
         return pyxlsb2
 
+    def _get_logger_io(self):
+        class logger(io.TextIOBase):
+            unit = self
+
+            def write(self, string: str):
+                string = string.strip()
+                if not string or '\n' in string:
+                    return
+                if re.search(R'^[A-Z]+:', string) or '***' in string:
+                    self.unit.log_debug(string)
+
+        return logger()
+
 
 class xlxtr(_ExcelUnit):
     """
@@ -276,13 +295,23 @@ class xlxtr(_ExcelUnit):
         super().__init__(references=references)
 
     def process(self, data):
-        wb = Workbook(data, self)
+        try:
+            wb = Workbook(data, self)
+        except ImportError:
+            raise
+        except Exception as E:
+            raise ValueError('Input not recognized as Excel document.') from E
         for ref in self.args.references:
             ref: SheetReference
             for k, name in enumerate(wb.sheets()):
                 if not ref.match(k, name):
                     continue
-                for r, row in enumerate(wb.get_sheet_data(name), 1):
+                try:
+                    data = wb.get_sheet_data(name)
+                except Exception as error:
+                    self.log_info(F'error reading sheet {name}:', error)
+                    continue
+                for r, row in enumerate(data, 1):
                     for c, value in enumerate(row, 1):
                         if (r, c) not in ref:
                             continue

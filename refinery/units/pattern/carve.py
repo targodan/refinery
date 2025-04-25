@@ -63,11 +63,11 @@ class carve(PatternExtractor):
             from ..encoding.b32 import b32
             decoder = b32()
         elif self.args.format is formats.ps1str:
-            from ..encoding.ps1str import ps1str
-            decoder = ps1str()
+            from ..encoding.escps import escps
+            decoder = escps()
         elif self.args.format is formats.vbastr:
-            from ..encoding.ps1str import ps1str
-            decoder = ps1str()
+            from ..encoding.escps import escps
+            decoder = escps()
         elif self.args.format is formats.hexarray:
             from ..blockwise.pack import pack
             decoder = pack(0x10)
@@ -104,13 +104,14 @@ class csd(carve):
     Short for carve & decode; carves the single largest buffer of a given format from the input
     and decodes it with the appropriate decoder.
     """
-    def __init__(self, format, utf16=True, ascii=True):
+    def __init__(self, format, utf16=True, ascii=True, stripspace=False):
         super().__init__(
             format,
             decode=True,
             single=True,
             utf16=utf16,
             ascii=ascii,
+            stripspace=stripspace,
         )
 
 
@@ -119,11 +120,12 @@ class csb(carve):
     Short for carve single buffer; carves the single largest buffer of a given format from the
     input data and returns it.
     """
-    def __init__(self, format, utf16=True, ascii=True):
+    def __init__(self, format, utf16=True, ascii=True, stripspace=False):
         super().__init__(
             format,
             decode=False,
             single=True,
             utf16=utf16,
             ascii=ascii,
+            stripspace=stripspace,
         )

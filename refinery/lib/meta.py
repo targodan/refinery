@@ -156,6 +156,8 @@ class CustomStringRepresentation(abc.ABC):
     def __repr__(self): ...
 
 
+_INDEX = 'index'
+
 _PRINT_SAFE = set(string.printable.encode('latin1')) - set(b'|<>&\t\n\r\x0B\x0B')
 if os.name == 'nt':
     _PRINT_SAFE -= set(b'^"')
@@ -314,7 +316,7 @@ def check_variable_name(name: Optional[str], allow_derivations=False) -> None:
     elif not name.isidentifier():
         error = 'not an identifier.'
     elif not allow_derivations:
-        if name == 'index' or name in LazyMetaOracle.derivations:
+        if name == _INDEX or name in LazyMetaOracle.derivations:
             error = 'reserved for a derived property.'
     if error:
         raise ValueError(F'The variable name "{name}" is invalid; it is {error}')
@@ -414,6 +416,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
     ghost: bool
     chunk: ByteString
     cache: Dict[str, Union[str, int, float]]
+    index: Optional[int]
 
     history: Dict[str, List[Tuple[bool, Any]]]
     current: Dict[str, Any]
@@ -423,6 +426,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         self.ghost = False
         self.chunk = chunk
         self.cache = {}
+        self.index = None
         self.scope = scope
         self.tempval = {}
         self.current = {}
@@ -459,9 +463,6 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
             return
         for key, value in other.items():
             self[key] = value
-
-    def update_index(self, index: int):
-        self['index'] = index
 
     def inherit(self, parent: LazyMetaOracle):
         """
@@ -575,18 +576,22 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         return serializable
 
     def items(self):
+        yield (_INDEX, self.index)
         yield from self.tempval.items()
         yield from self.current.items()
 
     def keys(self):
+        yield _INDEX
         yield from self.tempval.keys()
         yield from self.current.keys()
 
     def variable_names(self):
+        yield _INDEX
         yield from self.current.keys()
 
     def values(self):
-        return (v for _, v in self.items())
+        yield self.index
+        yield from (v for _, v in self.items())
 
     __iter__ = keys
 
@@ -608,7 +613,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         - `sha1`, `sha256`, `sha512`, and `md5` are formatted as hex strings.
         - `size` is formatted as a human-readable size with unit.
         """
-        return self.format(spec, codec, args, symb, False, used)
+        return self.format(spec, codec, args, symb, binary=False, used=used)
 
     def format_bin(
         self,
@@ -635,7 +640,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
         - `h`: literal is a hex-encoded binary string
         - `e`: literal is an escaped ASCII string
         """
-        return self.format(spec, codec, args, symb, True, used)
+        return self.format(spec, codec, args, symb, binary=True, used=used)
 
     def format(
         self,
@@ -794,10 +799,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
                     expression = self.format(modifier, codec, args, symb, True, False, used)
                     output = DelayedNumSeqArgument(
                         expression.decode(codec), reverse=True, seed=converted)
-                    try:
-                        output = output()
-                    except Exception:
-                        output = output(Chunk(value, meta=self))
+                    output = output(Chunk(value, meta=self))
 
                 if output is None:
                     output = converted
@@ -822,9 +824,10 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
 
     def __contains__(self, key):
         return (
-            key in self.current or # noqa
-            key in self.tempval or # noqa
-            key in self.derivations
+            key == _INDEX
+            or key in self.current
+            or key in self.tempval
+            or key in self.derivations
         )
 
     def __len__(self):
@@ -877,6 +880,8 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
             return value
 
     def __getitem__(self, key):
+        if key == _INDEX:
+            return self.index
         try:
             value = self.current[key]
         except KeyError:

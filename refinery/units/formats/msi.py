@@ -17,6 +17,7 @@ from refinery.lib import chunks
 from refinery.lib.types import ByteStr, JSONDict
 from refinery.lib.mime import FileMagicInfo
 from refinery.lib.tools import cached_property
+from refinery.lib.cab import Cabinet
 
 from refinery.units.formats.csv import csv
 
@@ -262,6 +263,10 @@ class xtmsi(xtdoc):
                 continue
             processed = []
             info = list(table.values())
+            keys = list(table.keys())
+            temp = [k.strip('_') for k in keys]
+            if len(set(keys)) == len(set(temp)):
+                keys = temp
             for r, row in enumerate(stream_to_rows(stream(stream_name), column_formats(table))):
                 values = []
                 for index, value in enumerate(row):
@@ -283,8 +288,8 @@ class xtmsi(xtdoc):
                     tbl_properties[values[0]] = values[2]
                 if table_name == 'Component':
                     tbl_properties[values[0]] = F'%{values[2]}%'
-                entry = dict(zip(table, values))
-                einfo = {t: i for t, i in zip(table, info)}
+                entry = dict(zip(keys, values))
+                einfo = {t: i for t, i in zip(keys, info)}
                 if table_name == 'MsiFileHash':
                     entry['Hash'] = struct.pack(
                         '<IIII',
@@ -368,7 +373,6 @@ class xtmsi(xtdoc):
             for cab in cabs:
                 self.log_info(F'found cab file: {cab}')
         if cabs:
-            from refinery.units.formats.archive.xtcab import xtcab
             file_names: Dict[str, JSONDict] = {}
 
             for file_info in processed_table_data.get('File', []):
@@ -383,7 +387,8 @@ class xtmsi(xtdoc):
 
             for path, cab in cabs.items():
                 try:
-                    unpacked: List[UnpackResult] = list(xtcab().unpack(cab.get_data()))
+                    _cabinet = Cabinet(cab.get_data())
+                    unpacked = _cabinet.process().get_files()
                 except Exception as e:
                     self.log_info(F'unable to extract embedded cab file: {e!s}')
                     continue
@@ -395,9 +400,9 @@ class xtmsi(xtdoc):
                     cab.path = F'{path}.cab'
                     streams[cab.path] = cab
                 for result in unpacked:
-                    sub_path = file_names.get(result.path, result.path)
+                    sub_path = file_names.get(result.name, result.name)
                     sub_path = self._get_path_separator().join((path, sub_path))
-                    streams[sub_path] = result
+                    streams[sub_path] = UnpackResult(sub_path, lambda r=result: r.decompress())
 
         streams = {fix_msi_path(path): item for path, item in streams.items()}
         ds = UnpackResult(self._SYNTHETIC_STREAMS_FILENAME,

@@ -98,7 +98,7 @@ be as similar as possible:
   objects that can be connected to a pipeline from the right using `|` for
   various different output options. See below for details.
 
-If you want to use frames in code, simply omit any pipe before a square bracked.
+If you want to use frames in code, simply omit any pipe before a square bracket.
 For example, the first example from the `refinery.lib.frame` documentation
 translates to the following Python code:
 
@@ -2103,14 +2103,17 @@ class Unit(UnitBase, abstract=True):
         self._chunks = None
         self.console = False
 
-        keywords.update(dict(
+        for key, value in dict(
             nesting=0,
             iff=0,
             reverse=False,
             squeeze=False,
             devnull=False,
+            verbose=0,
+            lenient=0,
             quiet=False,
-        ))
+        ).items():
+            keywords.setdefault(key, value)
         # Since Python 3.6, functions always preserve the order of the keyword
         # arguments passed to them (see PEP 468).
         self.args = DelayedArgumentProxy(Namespace(**keywords), list(keywords))

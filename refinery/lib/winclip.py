@@ -129,9 +129,9 @@ class ClipBoard:
     def paste(self):
         hg = GetClipboardData(self.mode.value)
         if self.mode is CF.TEXT or self.mode is CF.OEMTEXT:
-            return ctypes.c_char_p(hg).value
+            return ptr.value if (ptr := ctypes.c_char_p(hg)) else B''
         if self.mode is CF.UNICODETEXT:
-            return ctypes.c_wchar_p(hg).value.encode('utf8')
+            return ptr.value.encode('utf8') if (ptr := ctypes.c_wchar_p(hg)) else B''
         if self.mode is CF.DIB:
             def get_pixel_data_offset_for_packed_dib(header: BITMAPINFOHEADER) -> int:
                 extra = 0
@@ -160,15 +160,21 @@ class ClipBoard:
 
     def copy(self, data):
         EmptyClipboard()
-        size = len(data)
         if self.mode in (CF.TEXT, CF.OEMTEXT):
-            size += 1
+            if isinstance(data, str):
+                data = data.encode('latin1')
+            if not data.endswith(B'\0'):
+                data = data + B'\0'
         if self.mode is CF.UNICODETEXT:
-            size += 2
+            if isinstance(data, str):
+                data = data.encode('utf-16le')
+            if not data.endswith(B'\0\0'):
+                data = data + B'\0\0'
+        size = len(data)
         glob = GlobalAlloc(GMEM_DDESHARE | GMEM_ZEROINIT, size)
         lock = GlobalLock(ctypes.c_void_p(glob))
         ctypes.windll.msvcrt.memset(ctypes.c_char_p(lock), 0, size)
-        ctypes.windll.msvcrt.memcpy(ctypes.c_char_p(lock), data, len(data))
+        ctypes.windll.msvcrt.memcpy(ctypes.c_char_p(lock), data, size)
         GlobalUnlock(lock)
         SetClipboardData(self.mode.value, glob)
 

@@ -9,23 +9,30 @@ class TestIPFS(TestUnitBase):
         data = self.download_sample('ccc40b5355ab03d75fb66742558031a452986cfb0110804fd8614f52226ca1bf')
         disassembly = str(data | self.load())
         for line in (
-            R"""typedef TWINDOWSVERSION = struct {U32, U32, U32, U32, U32, BOOLEAN, U08, U16}""",
+            R"""typedef TWindowsVersion = struct {U32, U32, U32, U32, U32, Boolean, U08, U16}""",
             R"""typedef TFILETIME = struct {U32, U32}""",
-            R"""  0x0373  Assign      LocalVar5, 'WinHttp.WinHttpRequest.5.1'""",
-            R"""begin sub PAGEDOWNLOADCANCELBUTTONCLICK(Argument0: TWIZARDPAGE, *Argument1: BOOLEAN, *Argument2: BOOLEAN)"""
+            R"""  0x0373   5  Assign""",
+            R"""LocalVar5 := 'WinHttp.WinHttpRequest.5.1'""",
+            R"""procedure PAGEDOWNLOADCANCELBUTTONCLICK(Argument1: TWizardPage, *Argument2: Boolean, *Argument3: Boolean)"""
         ):
             self.assertIn(line, disassembly)
 
     def test_regression_01(self):
         data = self.download_sample('2d3f393969037a0d0f19e1e01637bed00e0d766fafbb8916a2f6d0b1f8d4cdcd')
         test = data | self.load() | str
-        self.assertIn('external symbol GETARRAYLENGTH', test)
+        self.assertIn('external function GetArrayLength', test)
 
     def test_regression_02(self):
         data = self.download_sample('24e78242889d836eb31e2e7d39c7c87f97dcd35f15282813aad5f02978b5bf3b')
         test = data | self.load() | str
         self.assertEqual(test.count('https://aka.ms/vs/16/release/vc_redist.x64.exe'), 1)
         self.assertEqual(test.count('https://aka.ms/vs/16/release/vc_redist.x86.exe'), 1)
+
+    def test_load_flags_version_22(self):
+        data = self.download_sample('6c211c02652317903b23c827cbc311a258fcd6197eec6a3d2f91986bd8accb0e')
+        test = data | self.load() | str
+        self.assertContains(test, 'kernel32::CloseHandle(Argument1)')
+        self.assertContains(test, 'idp::idpFilesDownloaded()')
 
 
 class TestIFPSStrings(TestUnitBase):
@@ -51,4 +58,4 @@ class TestIFPSStrings(TestUnitBase):
     def test_issue_70(self):
         data = self.download_sample('dd4b75e1045c32756de639404b1d9644394891dfb53adc8b701c7a5c2a4b650c')
         test = data | self.load() | self.ldu('resplit') | [str]
-        self.assertIn('WIZARDFORM: Class;', test)
+        self.assertIn('global WIZARDFORM: Class', test)

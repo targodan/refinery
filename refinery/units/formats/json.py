@@ -31,13 +31,19 @@ class xtjson(PathExtractorUnit):
             if path:
                 yield path, cursor, cursor.__class__.__name__
 
-        for path, item, typename in crawl('', json.loads(data)):
+        if not isinstance(data, (dict, list)):
+            data = json.loads(data)
+
+        for path, item, typename in crawl('', data):
             def extract(item=item):
                 if isinstance(item, (list, dict)):
                     dumped = json.dumps(item, indent=4)
                 else:
                     dumped = str(item)
-                return dumped.encode('latin1')
+                try:
+                    return dumped.encode('latin1')
+                except UnicodeEncodeError:
+                    return dumped.encode('utf8')
 
             yield UnpackResult(path, extract, type=typename)
 

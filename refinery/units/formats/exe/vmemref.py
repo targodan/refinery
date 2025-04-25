@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import TYPE_CHECKING, Container
+from collections import deque
 
 from refinery.units import Arg, Unit
 from refinery.lib.executable import Range, Executable, CompartmentNotFound
@@ -20,8 +21,10 @@ class vmemref(Unit):
     at the given offset.
     """
 
-    @Unit.Requires('smda', 'all')
+    @Unit.Requires('smda<2.0', 'all')
     def _smda():
+        import datetime
+        datetime.UTC = datetime.timezone.utc
         import smda
         import smda.Disassembler
         import smda.DisassemblyResult
@@ -32,7 +35,9 @@ class vmemref(Unit):
         exe: Executable,
         function: SmdaFunction,
         codes: Container[Range],
-        max_dereference: int = 1
+        max_dereference_depth: int,
+        max_dereference_count: int,
+        references: dict,
     ):
         def is_valid_data_address(address):
             if not isinstance(address, int):
@@ -50,13 +55,14 @@ class vmemref(Unit):
             return int.from_bytes(exe[address:address + pointer_size], exe.byte_order().value)
 
         pointer_size = exe.pointer_size // 8
-        instructions = {op.offset for op in function.getInstructions()}
 
-        references = set()
+        with NoLogging():
+            instructions = {op.offset: op for op in function.getInstructions()}
 
-        for op in function.getInstructions():
+        for op in instructions.values():
             try:
-                refs = list(op.getDataRefs())
+                with NoLogging():
+                    refs = list(op.getDataRefs())
             except Exception:
                 continue
             for address in refs:
@@ -64,18 +70,25 @@ class vmemref(Unit):
                     address = int(address)
                 except Exception:
                     continue
-                times_dereferenced = 0
-                while is_valid_data_address(address) and address not in references:
-                    references.add(address)
-                    times_dereferenced += 1
-                    if max_dereference and max_dereference > 0 and times_dereferenced > max_dereference:
-                        break
-                    try:
-                        address = dereference(address)
-                    except Exception:
-                        break
-
-        return references
+                addresses = deque([address])
+                while addresses:
+                    address = addresses.pop()
+                    if not is_valid_data_address(address):
+                        continue
+                    if (count := references.get(address, 0)) > max_dereference_depth:
+                        continue
+                    elif not count:
+                        yield address
+                    references[address] = count + 1
+                    for _ in range(max_dereference_count):
+                        try:
+                            point = dereference(address)
+                        except Exception:
+                            pass
+                        else:
+                            addresses.appendleft(point)
+                        finally:
+                            address += pointer_size
 
     def __init__(
         self,
@@ -87,8 +100,21 @@ class vmemref(Unit):
             'data until the end of the section is returned.')) = None,
         base: Arg.Number('-b', metavar='ADDR',
             help='Optionally specify a custom base address B.') = None,
+        deref_count: Arg.Number('-c', help=(
+            'Optionally specify the number of items to inspect at a discovered memory address as '
+            'as a potential pointer. The default is {default}.')) = 1,
+        deref_depth: Arg.Number('-d', help=(
+            'Optionally specify the maximum number of times that referenced data is dereferenced '
+            'as a pointer, potentially leading to another referenced memory location. The default '
+            'is {default}.')) = 2,
     ):
-        super().__init__(address=address, take=take, base=base)
+        super().__init__(
+            address=address,
+            take=take,
+            base=base,
+            deref_count=deref_count,
+            deref_depth=deref_depth,
+        )
 
     def process(self, data):
         smda = self._smda
@@ -97,7 +123,7 @@ class vmemref(Unit):
         fmt = exe.pointer_size // 4
         addresses = self.args.address
 
-        self.log_info(R'disassembling and exploring call graph using smda')
+        self.log_info('disassembling and exploring call graph using smda')
         with NoLogging():
             cfg = smda.Disassembler.SmdaConfig()
             cfg.CALCULATE_SCC = False
@@ -110,7 +136,7 @@ class vmemref(Unit):
             graph = dsm.disassembleUnmappedBuffer(_input)
 
         self.log_info('collecting code addresses for memory reference exclusion list')
-        visits = set()
+        visits = {}
         avoid = set()
 
         for symbol in exe.symbols():
@@ -121,7 +147,8 @@ class vmemref(Unit):
         if addresses:
             reset = visits.clear
         else:
-            def reset(): pass
+            def reset():
+                pass
             self.log_info('scanning executable for functions')
             with NoLogging():
                 addresses = [pfn.offset for pfn in graph.getFunctions()]
@@ -131,13 +158,17 @@ class vmemref(Unit):
             reset()
             address, function = min(graph.xcfg.items(), key=lambda t: (t[0] >= a, abs(t[0] - a)))
             self.log_debug(F'scanning function: 0x{address:0{fmt}X}')
-            refs = list(self._memory_references(exe, function, avoid))
+            refs = list(self._memory_references(
+                exe,
+                function,
+                avoid,
+                self.args.deref_depth,
+                self.args.deref_count,
+                visits,
+            ))
             refs.sort(reverse=True)
             last_start = None
             for ref in refs:
-                if ref in visits:
-                    continue
-                visits.add(ref)
                 try:
                     box = exe.location_from_address(ref)
                     end = box.physical.box.upper
